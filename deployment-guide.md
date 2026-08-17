@@ -629,6 +629,8 @@ RUSTFS_VOLUMES="/data/rustfs0"
 RUSTFS_ADDRESS="127.0.0.1:9000"
 RUSTFS_CONSOLE_ADDRESS="127.0.0.1:9001"
 RUSTFS_CONSOLE_ENABLE=true
+RUSTFS_CORS_ALLOWED_ORIGINS="*"
+RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS="*"
 RUST_LOG=error
 RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 EOF
@@ -637,6 +639,8 @@ sudo chmod 640 /etc/default/rustfs
 ```
 
 > 将两个占位符替换为分别至少 16 和 32 字节的随机值，并保存到密码管理系统。不要使用 `rustfsadmin` 等公开默认值。
+
+> `RUSTFS_CORS_ALLOWED_ORIGINS=*` 使浏览器可直接使用后端生成的预签名上传/下载 URL；`RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS` 只影响管理控制台。公网生产环境建议将 `*` 改为逗号分隔的实际前端 Origin，例如 `https://cict.example.com`。
 
 #### 1.7.3 创建存储目录
 
@@ -1658,6 +1662,8 @@ services:
       RUSTFS_ADDRESS: ":9000"
       RUSTFS_CONSOLE_ADDRESS: ":9001"
       RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
       RUSTFS_OBS_LOGGER_LEVEL: error
       RUSTFS_OBS_LOG_DIRECTORY: /var/log/rustfs/
     volumes:
