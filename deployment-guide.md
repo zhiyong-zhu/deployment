@@ -781,6 +781,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
+pike.api.white-list[8]=/api/auth/login
 
 # ===== AutoCrud 扫描包配置 =====
 autocrud.base-packages=com.polelink
@@ -831,6 +832,8 @@ sudo chmod 640 /etc/cict/application.properties
 > - `pike.file.s3.endpoint`：修改为 RustFS 服务器地址
 > - `pike.file.s3.accessKey` / `secretKey`：替换为 RustFS 中创建的访问密钥
 > - `server.port=9090`：后端服务监听端口，Nginx 代理需指向此端口
+
+> Spring Boot 对多个配置源中的 List 通常采用整体替换，不是逐项合并。外部配置了 `pike.api.white-list[n]` 后，应把所有必需的公开端点列全；登录只放行精确路径 `/api/auth/login`，不要放宽为 `/api/auth/**`。
 
 #### 1.8.4 创建 systemd 服务
 
@@ -1368,6 +1371,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
+pike.api.white-list[8]=/api/auth/login
 
 # ===== AutoCrud 扫描包配置 =====
 autocrud.base-packages=com.polelink

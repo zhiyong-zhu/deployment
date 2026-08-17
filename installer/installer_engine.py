@@ -1128,6 +1128,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
+pike.api.white-list[8]=/api/auth/login
 autocrud.base-packages=com.polelink
 spring.datasource.url=jdbc:mariadb://127.0.0.1:3306/cict
 spring.datasource.username=cict
