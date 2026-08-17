@@ -5,4 +5,5 @@ installer/dist/
 installer/build/
 installer/*.spec
 installer/.venv/
+installer/.build-venv/
 installer/config.json
