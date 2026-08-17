@@ -94,18 +94,18 @@ sudo apt update
 sudo apt install -y mariadb-server mariadb-client
 ```
 
-#### 1.2.3 迁移数据目录
+#### 1.2.3 初始化数据目录
 
-MariaDB 安装包会先在默认的 `/var/lib/mysql` 中初始化系统库。不能只创建一个空目录后修改 `datadir`；应先停止服务并完整迁移现有数据：
+CICT 需要兼容大小写不一致的历史 SQL，因此使用 `lower_case_table_names=1`。该参数必须在系统表首次初始化时确定，不能复制已按默认值 `0` 初始化的 `/var/lib/mysql`。
 
 ```bash
 sudo systemctl stop mariadb
-sudo mkdir -p /data/db/mysql
-sudo rsync -aHAX --numeric-ids /var/lib/mysql/ /data/db/mysql/
-sudo chown -R mysql:mysql /data/db/mysql
+if [ -d /data/db/mysql/mysql ]; then
+  echo "/data/db/mysql 已初始化；请先备份并移走旧目录" >&2
+  exit 1
+fi
+sudo install -d -o mysql -g mysql -m 0750 /data/db/mysql
 ```
-
-> 全新安装也可以使用 `sudo mariadb-install-db --user=mysql --datadir=/data/db/mysql` 初始化空目录，但不得在已有业务数据的目录上执行。若不需要自定义数据目录，保留默认 `/var/lib/mysql` 最稳妥。
 
 如果系统存在 MariaDB AppArmor 配置，再增加数据目录权限；不同来源的软件包可能使用 `usr.sbin.mariadbd` 或 `usr.sbin.mysqld`，应以本机实际文件名为准：
 
@@ -121,6 +121,19 @@ EOF
 fi
 ```
 
+在空目录上初始化系统表：
+
+```bash
+sudo mariadb-install-db \
+  --user=mysql \
+  --datadir=/data/db/mysql \
+  --auth-root-authentication-method=socket \
+  --skip-test-db \
+  --lower-case-table-names=1
+```
+
+> 不得在已有业务数据的目录上执行 `mariadb-install-db`。已有 `lower_case_table_names=0` 的实例需要逻辑备份（dump）后在新目录恢复，不能原地切换。
+
 #### 1.2.4 配置 MariaDB
 
 创建配置文件 `/etc/mysql/mariadb.conf.d/server.cnf`：
@@ -131,6 +144,7 @@ sudo tee /etc/mysql/mariadb.conf.d/server.cnf <<'EOF'
 
 # ===== 数据目录 =====
 datadir=/data/db/mysql
+lower_case_table_names=1
 
 # ===== 性能与安全 =====
 performance_schema=1
@@ -196,6 +210,7 @@ EOF
 > |--------|------|--------|------|
 > | `character-set-server` | `utf8` | `utf8mb4` | `utf8` 即 `utf8mb3`，不支持 4 字节字符（emoji、生僻字），已废弃 |
 > | `collation-server` | `utf8_general_ci` | `utf8mb4_general_ci` | 配合字符集升级 |
+> | `lower_case_table_names` | 系统默认 `0` | `1` | 兼容历史 SQL 中的表名大小写差异；必须在数据目录初始化时确定 |
 > | `init_connect` 中的字符集 | `utf8` / `utf8_general_ci` | 单条 `SET NAMES utf8mb4 COLLATE utf8mb4_general_ci` | 避免重复配置时后一个值覆盖前一个值 |
 > | `transaction-isolation` | `transaction-isolation` | `transaction_isolation` | 连字符形式已废弃，改用下划线形式 |
 > | `max_allowed_packet` | `16M` | `64M` | 现代应用经常需要传输较大数据包（如批量 SQL、大 BLOB） |
@@ -213,7 +228,7 @@ EOF
 > | `skip-name-resolve` | 缺失 | `ON` | **新增**：跳过 DNS 反查，避免连接延迟 |
 > | `innodb_ft_min_token_size` | 缺失 | `4` | **新增**：InnoDB 全文索引最小词长（原 `ft_min_word_len` 仅影响 MyISAM） |
 >
-> **保留不变的配置项**：`datadir`、`performance_schema`、`log_bin_trust_function_creators`、`max_sp_recursion_depth`、`back_log`、`table_open_cache`、`table_definition_cache`、`binlog_cache_size`、`max_heap_table_size`、`log-bin`、`long_query_time`、`ft_min_word_len`。二进制日志改用 `ROW` 格式，并用秒数参数设置 3 天过期时间。`lower_case_table_names` 必须在数据目录首次初始化前确定，本指南不再强制修改，应用应统一表名大小写。
+> **保留不变的配置项**：`datadir`、`performance_schema`、`log_bin_trust_function_creators`、`max_sp_recursion_depth`、`back_log`、`table_open_cache`、`table_definition_cache`、`binlog_cache_size`、`max_heap_table_size`、`log-bin`、`long_query_time`、`ft_min_word_len`。二进制日志改用 `ROW` 格式，并用秒数参数设置 3 天过期时间。
 >
 > **参数调整建议**：`innodb_buffer_pool_size` 应设为物理内存的 50%-70%（示例 4G，请根据实际内存调整）。
 
@@ -1091,14 +1106,7 @@ sudo apt-get install -y --no-download build-essential gcc make pkg-config net-to
 sudo apt-get install -y --no-download mariadb-server mariadb-client
 ```
 
-按第 1 章的流程迁移已初始化的数据目录：
-
-```bash
-sudo systemctl stop mariadb
-sudo mkdir -p /data/db/mysql
-sudo rsync -aHAX --numeric-ids /var/lib/mysql/ /data/db/mysql/
-sudo chown -R mysql:mysql /data/db/mysql
-```
+按 [1.2.3 初始化数据目录](#123-初始化数据目录) 在空的 `/data/db/mysql` 上以 `lower_case_table_names=1` 初始化；不得复制已按默认值 `0` 初始化的 `/var/lib/mysql`。
 
 创建配置文件 `/etc/mysql/mariadb.conf.d/server.cnf`，内容与 [1.2.4 配置 MariaDB](#124-配置-mariadb) 完全相同。
 
@@ -1364,6 +1372,9 @@ spring.datasource.url=jdbc:mariadb://mariadb:3306/cict
 spring.datasource.username=${MARIADB_USER}
 spring.datasource.password=${MARIADB_PASSWORD}
 
+# ===== Quartz 配置 =====
+spring.quartz.properties.org.quartz.jobStore.tablePrefix=qrtz_
+
 # ===== Redis 配置（Spring Boot 2.x） =====
 spring.redis.host=redis
 spring.redis.port=6379
@@ -1430,6 +1441,7 @@ sudo tee /data/app/cict-docker/mariadb/server.cnf <<'EOF'
 [mysqld]
 
 # ===== 性能与安全 =====
+lower_case_table_names=1
 performance_schema=1
 skip-name-resolve=ON
 log_bin_trust_function_creators = 1
@@ -1485,6 +1497,8 @@ innodb_ft_min_token_size = 4
 ft_min_word_len = 4
 EOF
 ```
+
+> `lower_case_table_names=1` 必须在 MariaDB 数据卷首次初始化时生效。已使用默认值 `0` 初始化的 `./data/mariadb` 不能直接切换，应先逻辑备份，再用新数据卷初始化并恢复。
 
 > 配置项修订说明见 [1.2.4 配置 MariaDB](#124-配置-mariadb) 中的配置修订表。
 

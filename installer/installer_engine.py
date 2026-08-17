@@ -341,11 +341,29 @@ def task_packages(context: InstallContext, task_id: str) -> None:
 
 def task_mariadb(context: InstallContext, task_id: str) -> None:
     target = Path("/data/db/mysql")
+    initialized = (target / "mysql").is_dir()
     context.progress(task_id, 5, "准备 MariaDB 数据目录")
+    if initialized:
+        run_command(context, task_id, ["systemctl", "start", "mariadb"])
+        state_output = run_command(
+            context,
+            task_id,
+            ["mariadb", "--protocol=socket", "-Nse", "SELECT @@lower_case_table_names, @@datadir;"],
+        )
+        current = state_output.splitlines()[-1].split() if state_output else []
+        if len(current) < 2 or current[0] != "1" or Path(current[1]).resolve() != target.resolve():
+            mode = current[0] if current else "unknown"
+            datadir = current[1] if len(current) > 1 else "unknown"
+            raise InstallError(
+                "现有 MariaDB 数据目录与安装基线不兼容："
+                f"lower_case_table_names={mode}, datadir={datadir}。"
+                "该参数无法对已初始化的数据目录原地修改，安装器不会自动删除数据。"
+                "请备份后移走 /data/db/mysql，再重新执行安装。"
+            )
     run_command(context, task_id, ["systemctl", "stop", "mariadb"])
     target.mkdir(parents=True, exist_ok=True)
-    if not (target / "mysql").exists():
-        run_command(context, task_id, ["rsync", "-aHAX", "--numeric-ids", "/var/lib/mysql/", f"{target}/"])
+    if not initialized and any(target.iterdir()):
+        raise InstallError("MariaDB 目标目录 /data/db/mysql 非空，拒绝覆盖未识别的文件")
     shutil.chown(target, user="mysql", group="mysql")
     run_command(context, task_id, ["chown", "-R", "mysql:mysql", str(target)])
     buffer_mib = calculate_buffer_pool_mib()
@@ -359,6 +377,20 @@ def task_mariadb(context: InstallContext, task_id: str) -> None:
             run_command(context, task_id, ["apparmor_parser", "-r", str(apparmor_profile)])
         else:
             context.log(task_id, "AppArmor 内核接口未启用（常见于 WSL），跳过规则加载", "warning")
+    if not initialized:
+        context.progress(task_id, 35, "以不区分大小写模式初始化 MariaDB")
+        run_command(
+            context,
+            task_id,
+            [
+                "mariadb-install-db",
+                "--user=mysql",
+                f"--datadir={target}",
+                "--auth-root-authentication-method=socket",
+                "--skip-test-db",
+                "--lower-case-table-names=1",
+            ],
+        )
     context.progress(task_id, 45, "启动 MariaDB")
     run_command(context, task_id, ["systemctl", "enable", "mariadb"])
     run_command(context, task_id, ["systemctl", "restart", "mariadb"])
@@ -373,7 +405,11 @@ FLUSH PRIVILEGES;
 """
     context.progress(task_id, 70, "创建业务库和账号")
     run_command(context, task_id, ["mariadb", "--protocol=socket"], input_text=sql, display="mariadb --protocol=socket < [受保护 SQL]")
-    run_command(context, task_id, ["mariadb", "--protocol=socket", "-Nse", "SELECT VERSION(), @@datadir;"])
+    run_command(
+        context,
+        task_id,
+        ["mariadb", "--protocol=socket", "-Nse", "SELECT VERSION(), @@datadir, @@lower_case_table_names;"],
+    )
     context.progress(task_id, 100, "MariaDB 配置完成")
 
 
@@ -826,6 +862,7 @@ def format_s3_error(status: int, payload: bytes) -> str:
 def mariadb_config(buffer_mib: int) -> str:
     return f"""[mysqld]
 datadir=/data/db/mysql
+lower_case_table_names=1
 performance_schema=1
 bind-address=127.0.0.1
 skip-name-resolve=ON
