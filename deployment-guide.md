@@ -774,6 +774,10 @@ spring.datasource.url=jdbc:mariadb://127.0.0.1:3306/cict
 spring.datasource.username=cict
 spring.datasource.password=${CICT_DATABASE_PASSWORD}
 
+# ===== Quartz 配置 =====
+# 业务 SQL 以小写 qrtz_ 创建表，Linux MariaDB 默认区分表名大小写
+spring.quartz.properties.org.quartz.jobStore.tablePrefix=qrtz_
+
 # ===== Redis 配置 =====
 # Spring Boot 2.x 使用 spring.redis.*；若项目已升级到 3.x，请改为 spring.data.redis.*
 spring.redis.host=127.0.0.1
@@ -806,6 +810,7 @@ sudo chmod 640 /etc/cict/application.properties
 > **配置项说明**：
 > - `spring.datasource.url`：修改为实际的数据库地址、端口和数据库名
 > - `spring.datasource.username/password`：使用 1.2.5 创建的业务账号，密码来自受保护的 `cict.conf`
+> - `spring.quartz.properties.org.quartz.jobStore.tablePrefix`：必须与实际 Quartz 表前缀的大小写一致；本指南的业务 SQL 使用 `qrtz_`
 > - Redis 与 RabbitMQ：默认只连接本机；密码和账号必须与前述服务配置一致
 > - `pike.file.s3.endpoint`：修改为 RustFS 服务器地址
 > - `pike.file.s3.accessKey` / `secretKey`：替换为 RustFS 中创建的访问密钥

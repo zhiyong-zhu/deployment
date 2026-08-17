@@ -1053,6 +1053,7 @@ autocrud.base-packages=com.polelink
 spring.datasource.url=jdbc:mariadb://127.0.0.1:3306/cict
 spring.datasource.username=cict
 spring.datasource.password=${CICT_DATABASE_PASSWORD}
+spring.quartz.properties.org.quartz.jobStore.tablePrefix=qrtz_
 spring.redis.host=127.0.0.1
 spring.redis.port=6379
 spring.rabbitmq.host=127.0.0.1
