@@ -78,3 +78,9 @@ sudo ./uninstall.sh
 脚本使用 Linux amd64 Python 构建环境生成单文件 ELF；PyInstaller 只参与构建，Ubuntu 目标机不需要 Python。
 
 也可以直接在 Ubuntu amd64 构建机执行 `./build-binary-native.sh`。该脚本会在 `installer/.build-venv/` 创建隔离构建环境，不会修改系统 Python；若系统未安装 venv 支持，先执行 `sudo apt-get install -y python3-venv`。目标机运行包不需要安装 PyInstaller。
+
+构建脚本默认从清华 PyPI 镜像安装固定版本的 PyInstaller，并配置了下载超时与重试。企业内网可通过环境变量切换镜像：
+
+```bash
+CICT_PYPI_INDEX_URL=https://<内部镜像>/simple ./build-binary-native.sh
+```
