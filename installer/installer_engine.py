@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -513,7 +514,10 @@ def task_rustfs(context: InstallContext, task_id: str) -> None:
     write_file(Path("/etc/systemd/system/rustfs.service"), rustfs_service())
     context.progress(task_id, 80, "启动 RustFS")
     run_command(context, task_id, ["systemctl", "daemon-reload"])
-    run_command(context, task_id, ["systemctl", "enable", "--now", "rustfs"])
+    run_command(context, task_id, ["systemctl", "enable", "rustfs"])
+    # RustFS reads its credentials only at process startup. A rerun may have
+    # replaced /etc/default/rustfs, so an already-running service must restart.
+    run_command(context, task_id, ["systemctl", "restart", "rustfs"])
     wait_for_port("127.0.0.1", 9000, 45)
     context.progress(task_id, 88, "等待 RustFS S3 服务就绪")
     create_s3_bucket(context, task_id, context.secrets["rustfs_access_key"], context.secrets["rustfs_secret"], "pike")
@@ -710,9 +714,10 @@ def create_s3_bucket(context: InstallContext, task_id: str, access_key: str, sec
             urllib.request.urlopen(request, timeout=15).close()
             return
         except urllib.error.HTTPError as exc:
+            error_detail = format_s3_error(exc.code, exc.read(8192))
             if exc.code == 409:
                 return
-            last_error = f"HTTP {exc.code}"
+            last_error = error_detail
             if exc.code not in {429, 500, 502, 503, 504}:
                 raise InstallError(f"创建 RustFS 存储桶失败: {last_error}") from exc
         except urllib.error.URLError as exc:
@@ -720,6 +725,19 @@ def create_s3_bucket(context: InstallContext, task_id: str, access_key: str, sec
         context.log(task_id, f"RustFS 尚未 ready（{last_error}），{attempt}/30，2 秒后重试", "warning")
         time.sleep(2)
     raise InstallError(f"RustFS 在 60 秒内未就绪，无法创建存储桶: {last_error}")
+
+
+def format_s3_error(status: int, payload: bytes) -> str:
+    """Return a useful S3 error without exposing request credentials."""
+    try:
+        root = ET.fromstring(payload)
+        code = (root.findtext("Code") or "").strip()
+        message = (root.findtext("Message") or "").strip()
+    except ET.ParseError:
+        code = ""
+        message = ""
+    detail = ": ".join(value for value in (code, message) if value)
+    return f"HTTP {status}" + (f" ({detail})" if detail else "")
 
 
 def mariadb_config(buffer_mib: int) -> str:
