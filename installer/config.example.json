@@ -1,0 +1,12 @@
+{
+  "bind": "127.0.0.1:8787",
+  "server_name": "cict-test-01",
+  "data_root": "/data/app",
+  "backend_jar": "/tmp/cict-app.jar",
+  "frontend_path": "/tmp/cict-dist.zip",
+  "db_password": "replace-with-16-or-more-safe-characters",
+  "rabbit_password": "replace-with-a-different-safe-password",
+  "rabbit_admin_password": "replace-with-another-safe-password",
+  "rustfs_access_key": "replace-with-16-or-more-letters-or-digits",
+  "rustfs_secret": "replace-with-16-or-more-safe-characters"
+}

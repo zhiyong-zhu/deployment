@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CICT Ubuntu 安装向导</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark">C</div>
+          <div>
+            <div class="brand-name">CICT 部署中心</div>
+            <div class="brand-subtitle">Ubuntu 24 · 直接安装</div>
+          </div>
+        </div>
+        <div class="topbar-status">
+          <span class="status-dot"></span>
+          <span id="host-status">正在读取主机状态</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="step-rail" aria-label="安装步骤">
+          <div class="rail-heading">安装流程</div>
+          <div class="step-list">
+            <div class="step active" data-step="1"><span class="step-number">1</span><span><strong>准备配置</strong><small>目标和发布文件</small></span></div>
+            <div class="step" data-step="2"><span class="step-number">2</span><span><strong>环境检查</strong><small>系统与资源</small></span></div>
+            <div class="step" data-step="3"><span class="step-number">3</span><span><strong>安装服务</strong><small>并行配置组件</small></span></div>
+            <div class="step" data-step="4"><span class="step-number">4</span><span><strong>部署应用</strong><small>CICT 前后端</small></span></div>
+            <div class="step" data-step="5"><span class="step-number">5</span><span><strong>验收</strong><small>健康检查</small></span></div>
+          </div>
+          <div class="rail-note warning-note">
+            <span class="note-icon">i</span>
+            <span>安装器会修改 apt 软件源、/data、/etc 和 systemd。请先在可回滚的 Ubuntu 24 虚拟机中运行。</span>
+          </div>
+        </aside>
+
+        <section class="content-column">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">DIRECT INSTALL / 1.0</div>
+              <h1>在 Ubuntu 24 安装 CICT</h1>
+              <p>安装器会执行真实的软件安装、配置写入、服务启动和验收检查。</p>
+            </div>
+            <div class="plan-badge danger-badge"><span class="pulse"></span>真实安装</div>
+          </div>
+
+          <form id="install-form">
+            <section class="panel config-panel">
+              <div class="panel-title-row">
+                <div><h2>部署目标</h2><p>基础运行方式已经固定为 Ubuntu 24 直接安装。</p></div>
+                <span class="locked-label">已锁定</span>
+              </div>
+              <div class="field-grid two-columns">
+                <label class="field"><span>服务器名称</span><input name="server_name" value="cict-prod-01" placeholder="例如 cict-prod-01" /></label>
+                <label class="field"><span>数据根目录</span><input name="data_root" value="/data/app" readonly /></label>
+              </div>
+            </section>
+
+            <section class="panel config-panel">
+              <div class="panel-title-row">
+                <div><h2>发布文件</h2><p>填写虚拟机本机路径；前端支持目录或 zip，后端必须是 JAR。</p></div>
+                <span class="required-label">必填</span>
+              </div>
+              <div class="field-grid two-columns">
+                <label class="field"><span>后端 JAR 路径</span><input name="backend_jar" placeholder="/tmp/cict-app.jar" required /></label>
+                <label class="field"><span>前端目录或 zip</span><input name="frontend_path" placeholder="/tmp/cict-dist.zip" required /></label>
+              </div>
+            </section>
+
+            <section class="panel config-panel credential-panel">
+              <div class="panel-title-row">
+                <div><h2>服务凭据</h2><p>可在配置文件中预置；页面生成或修改的凭据写入 640 权限配置文件，日志不会记录明文。</p></div>
+                <button type="button" class="text-button" id="generate-secrets">生成全部凭据</button>
+              </div>
+              <div class="field-grid two-columns">
+                <label class="field"><span>MariaDB 业务密码</span><input type="password" name="db_password" minlength="16" /></label>
+                <label class="field"><span>RabbitMQ 应用密码</span><input type="password" name="rabbit_password" minlength="16" /></label>
+                <label class="field"><span>RabbitMQ 管理密码</span><input type="password" name="rabbit_admin_password" minlength="16" /></label>
+                <label class="field"><span>RustFS Access Key</span><input type="password" name="rustfs_access_key" minlength="16" /></label>
+                <label class="field"><span>RustFS Secret Key</span><input type="password" name="rustfs_secret" minlength="16" /></label>
+              </div>
+            </section>
+
+            <section class="panel run-panel">
+              <div class="run-panel-copy">
+                <div class="run-icon">></div>
+                <div><h2>执行真实安装计划</h2><p>任务按依赖调度，服务配置阶段最多并行运行四项。</p></div>
+              </div>
+              <div class="run-panel-actions">
+                <button type="button" class="secondary-button" id="reset-button">重置</button>
+                <button type="submit" class="primary-button" id="start-button" disabled><span>开始安装</span><span class="button-arrow">→</span></button>
+              </div>
+            </section>
+            <label class="confirmation"><input type="checkbox" id="confirm-install" /><span>我确认当前主机是可回滚的 Ubuntu 24 测试虚拟机，并接受安装器修改系统配置。</span></label>
+          </form>
+
+          <section class="panel progress-panel hidden" id="progress-panel">
+            <div class="progress-heading">
+              <div><div class="eyebrow">LIVE INSTALL</div><h2 id="run-title">正在执行安装计划</h2></div>
+              <div class="overall-number" id="overall-number">0%</div>
+            </div>
+            <div class="progress-track"><div class="progress-fill" id="overall-fill"></div></div>
+            <div class="task-list" id="task-list"></div>
+          </section>
+        </section>
+
+        <aside class="log-column">
+          <div class="log-header"><div><div class="eyebrow">ACTIVITY LOG</div><h2>执行日志</h2></div><button class="icon-button" id="clear-log" title="清空日志">×</button></div>
+          <div class="log-meta"><span id="run-state">尚未开始</span><span id="log-count">0 条</span></div>
+          <div class="log-console" id="log-console"><div class="empty-log"><span class="empty-mark">_</span><p>开始安装后，任务日志会显示在这里。</p></div></div>
+          <div class="log-footer"><span class="legend-dot"></span> 本地运行 · 日志只保存在当前进程内</div>
+        </aside>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

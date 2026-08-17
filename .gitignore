@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+installer/dist/
+installer/build/
+installer/*.spec
+installer/.venv/
+installer/config.json
