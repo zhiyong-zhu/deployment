@@ -496,6 +496,7 @@ ExecStartPre=/data/app/nginx/sbin/nginx -t -q -g 'daemon on; master_process on;'
 ExecStart=/data/app/nginx/sbin/nginx -g 'daemon on; master_process on;'
 ExecReload=/data/app/nginx/sbin/nginx -s reload
 ExecStop=/data/app/nginx/sbin/nginx -s quit
+LimitNOFILE=65535
 PrivateTmp=true
 
 [Install]
@@ -902,7 +903,9 @@ else
   exit 1
 fi
 
-sudo rsync -a --delete "$FRONTEND_SOURCE/" /data/app/nginx/html/
+sudo rsync -a --delete --chown=root:www-data --chmod=D755,F644 \
+  "$FRONTEND_SOURCE/" /data/app/nginx/html/
+sudo -u www-data test -r /data/app/nginx/html/index.html
 sudo systemctl reload nginx
 ```
 
@@ -1854,7 +1857,8 @@ else
   echo "index.html not found in dist.zip" >&2
   exit 1
 fi
-rsync -a --delete "$FRONTEND_SOURCE/" /data/app/cict-docker/nginx/html/
+rsync -a --delete --chmod=D755,F644 \
+  "$FRONTEND_SOURCE/" /data/app/cict-docker/nginx/html/
 cd /data/app/cict-docker
 docker compose exec nginx nginx -s reload
 ```

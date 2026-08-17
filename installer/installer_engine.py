@@ -512,8 +512,9 @@ def task_nginx(context: InstallContext, task_id: str) -> None:
     context.progress(task_id, 85, "启动 Nginx")
     run_command(context, task_id, [str(binary), "-t"])
     run_command(context, task_id, ["systemctl", "daemon-reload"])
-    run_command(context, task_id, ["systemctl", "enable", "--now", "nginx"])
-    run_command(context, task_id, ["systemctl", "reload", "nginx"])
+    run_command(context, task_id, ["systemctl", "enable", "nginx"])
+    # A restart is required for systemd limits to reach the master process.
+    run_command(context, task_id, ["systemctl", "restart", "nginx"])
     context.progress(task_id, 100, "Nginx 配置完成")
 
 
@@ -594,9 +595,29 @@ def task_backend(context: InstallContext, task_id: str) -> None:
     os.replace(temporary_link, current)
     context.progress(task_id, 60, "部署前端文件")
     frontend_source, temporary_dir = resolve_frontend(Path(context.config["frontend_path"]))
-    run_command(context, task_id, ["rsync", "-a", "--delete", f"{frontend_source}/", "/data/app/nginx/html/"])
-    if temporary_dir:
-        shutil.rmtree(temporary_dir)
+    try:
+        run_command(
+            context,
+            task_id,
+            [
+                "rsync",
+                "-a",
+                "--delete",
+                "--chown=root:www-data",
+                "--chmod=D755,F644",
+                f"{frontend_source}/",
+                "/data/app/nginx/html/",
+            ],
+        )
+        run_command(
+            context,
+            task_id,
+            ["runuser", "-u", "www-data", "--", "test", "-r", "/data/app/nginx/html/index.html"],
+            display="验证 www-data 可读取前端 index.html",
+        )
+    finally:
+        if temporary_dir:
+            shutil.rmtree(temporary_dir)
     context.progress(task_id, 78, "启动 CICT 后端")
     run_command(context, task_id, ["systemctl", "daemon-reload"])
     run_command(context, task_id, ["systemctl", "enable", "cict"])
@@ -1027,6 +1048,7 @@ ExecStartPre=/data/app/nginx/sbin/nginx -t -q -g 'daemon on; master_process on;'
 ExecStart=/data/app/nginx/sbin/nginx -g 'daemon on; master_process on;'
 ExecReload=/data/app/nginx/sbin/nginx -s reload
 ExecStop=/data/app/nginx/sbin/nginx -s quit
+LimitNOFILE=65535
 PrivateTmp=true
 
 [Install]
