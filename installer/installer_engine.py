@@ -262,9 +262,14 @@ def task_preflight(context: InstallContext, task_id: str) -> None:
             context.log(task_id, f"端口 {port} 已有服务监听；安装器将按幂等方式检查现有服务", "warning")
     context.progress(task_id, 80, "检查网络")
     try:
-        urllib.request.urlopen("https://download.redis.io/", timeout=10).close()
+        request = urllib.request.Request(
+            f"https://download.redis.io/releases/redis-{REDIS_VERSION}.tar.gz",
+            headers={"User-Agent": "CICT-Installer/1.0", "Range": "bytes=0-0"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            context.log(task_id, f"在线软件源可访问（HTTP {response.status}）")
     except (OSError, urllib.error.URLError) as exc:
-        raise InstallError(f"无法访问在线软件源: {exc}") from exc
+        context.log(task_id, f"在线软件源连通性预检未通过，将在下载步骤再次尝试: {exc}", "warning")
     context.progress(task_id, 100, "环境检查通过")
 
 
