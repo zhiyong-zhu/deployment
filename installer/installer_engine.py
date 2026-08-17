@@ -600,9 +600,23 @@ def task_backend(context: InstallContext, task_id: str) -> None:
     context.progress(task_id, 78, "启动 CICT 后端")
     run_command(context, task_id, ["systemctl", "daemon-reload"])
     run_command(context, task_id, ["systemctl", "enable", "cict"])
+    run_command(context, task_id, ["systemctl", "reset-failed", "cict"])
     run_command(context, task_id, ["systemctl", "restart", "cict"])
     run_command(context, task_id, ["systemctl", "reload", "nginx"])
-    wait_for_port("127.0.0.1", 9090, 90)
+    try:
+        wait_for_service_port(
+            context,
+            "cict",
+            "127.0.0.1",
+            9090,
+            90,
+            log_paths=(Path("/data/app/cict/logs/cict.log"),),
+            stable_seconds=5,
+        )
+    except InstallError:
+        subprocess.run(["systemctl", "stop", "cict"], capture_output=True, check=False)
+        context.log(task_id, "CICT 启动失败，已停止服务以避免持续重启", "warning")
+        raise
     context.progress(task_id, 100, "CICT 应用部署完成")
 
 
@@ -686,12 +700,18 @@ def wait_for_service_port(
     timeout: int,
     *,
     log_paths: tuple[Path, ...] = (),
+    stable_seconds: int = 0,
 ) -> None:
     deadline = time.monotonic() + timeout
     failure_seen_at: float | None = None
+    stable_seen_at: float | None = None
     while time.monotonic() < deadline:
         if port_open(host, port):
-            return
+            stable_seen_at = stable_seen_at or time.monotonic()
+            if time.monotonic() - stable_seen_at >= stable_seconds:
+                return
+        else:
+            stable_seen_at = None
         state = systemd_service_state(service)
         failed = "ActiveState=failed" in state or "SubState=auto-restart" in state
         if failed:
@@ -1113,7 +1133,7 @@ def cict_service() -> str:
 Description=CICT Java Application
 Wants=network-online.target mariadb.service redis.service rabbitmq-server.service rustfs.service
 After=network-online.target mariadb.service redis.service rabbitmq-server.service rustfs.service
-StartLimitIntervalSec=60
+StartLimitIntervalSec=300
 StartLimitBurst=3
 
 [Service]
@@ -1126,7 +1146,7 @@ ExecStart=/bin/sh -c 'exec java $JAVA_OPTS -jar /data/app/cict/current.jar --spr
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

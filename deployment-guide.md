@@ -841,7 +841,7 @@ sudo tee /etc/systemd/system/cict.service <<'EOF'
 Description=CICT Java Application
 Wants=network-online.target mariadb.service redis.service rabbitmq-server.service rustfs.service
 After=network-online.target mariadb.service redis.service rabbitmq-server.service rustfs.service
-StartLimitIntervalSec=60
+StartLimitIntervalSec=300
 StartLimitBurst=3
 
 [Service]
@@ -856,7 +856,7 @@ ExecStart=java $JAVA_OPTS -jar /data/app/cict/current.jar --spring.config.additi
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -867,13 +867,15 @@ EOF
 |--------|------|
 | `current.jar` | 运维明确指定当前版本，避免按修改时间误选 JAR；回滚时切换符号链接即可 |
 | `ExecStart` | 使用 `$JAVA_OPTS`（来自 `cict.conf`）运行 `current.jar`，并加载外部配置文件 |
-| `Restart=on-failure` | 进程异常退出时自动重启 |
-| `StartLimitBurst=3` | 60 秒内最多重启 3 次，超过后停止重试（参数位于 `[Unit]`） |
+| `Restart=on-failure` | 仅在 Java 进程以非 0 状态退出时自动重启；普通日志异常不会触发 |
+| `StartLimitIntervalSec=300` / `StartLimitBurst=3` | 5 分钟内最多尝试启动 3 次，防止配置错误导致长期重启循环（参数位于 `[Unit]`） |
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable cict
 ```
+
+> 达到启动限制后，systemd 会将服务保持为 `failed`。修复配置后执行 `sudo systemctl reset-failed cict && sudo systemctl start cict`，不要在未处理根因时反复手工启动。
 
 ### 1.9 部署前后端代码
 
