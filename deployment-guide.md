@@ -560,9 +560,9 @@ server {
     root /data/app/nginx/html;
     index index.html;
 
-    # 不带结尾斜杠，保留原始 /api 前缀
+    # 尾斜杠会将对外的 /api/ 前缀替换为后端的 /
     location /api/ {
-        proxy_pass http://127.0.0.1:9090;
+        proxy_pass http://127.0.0.1:9090/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -781,7 +781,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
-pike.api.white-list[8]=/api/auth/login
+pike.api.white-list[8]=/auth/login
 
 # ===== AutoCrud 扫描包配置 =====
 autocrud.base-packages=com.polelink
@@ -833,7 +833,7 @@ sudo chmod 640 /etc/cict/application.properties
 > - `pike.file.s3.accessKey` / `secretKey`：替换为 RustFS 中创建的访问密钥
 > - `server.port=9090`：后端服务监听端口，Nginx 代理需指向此端口
 
-> Spring Boot 对多个配置源中的 List 通常采用整体替换，不是逐项合并。外部配置了 `pike.api.white-list[n]` 后，应把所有必需的公开端点列全；登录只放行精确路径 `/api/auth/login`，不要放宽为 `/api/auth/**`。
+> Spring Boot 对多个配置源中的 List 通常采用整体替换，不是逐项合并。外部配置了 `pike.api.white-list[n]` 后，应把所有必需的公开端点列全；Nginx 会去掉对外的 `/api` 前缀，因此登录只放行后端实际路径 `/auth/login`，不要放宽为 `/auth/**`。
 
 #### 1.8.4 创建 systemd 服务
 
@@ -1371,7 +1371,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
-pike.api.white-list[8]=/api/auth/login
+pike.api.white-list[8]=/auth/login
 
 # ===== AutoCrud 扫描包配置 =====
 autocrud.base-packages=com.polelink
@@ -1550,9 +1550,9 @@ server {
     root   /usr/share/nginx/html;
     index  index.html;
 
-    # 不带结尾斜杠，保留原始 /api 前缀
+    # 尾斜杠会将对外的 /api/ 前缀替换为后端的 /
     location /api/ {
-        proxy_pass http://cict:9090;
+        proxy_pass http://cict:9090/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1572,7 +1572,7 @@ server {
 }
 ```
 
-> 前端和 API 必须位于同一个默认虚拟主机中。`proxy_pass` 中的 `cict` 是 Docker Compose 服务名；这里不使用结尾斜杠，以保留后端路由所需的 `/api` 前缀。
+> 前端和 API 必须位于同一个默认虚拟主机中。`proxy_pass` 中的 `cict` 是 Docker Compose 服务名；结尾斜杠会把外部 `/api/auth/login` 映射为后端 `/auth/login`，避免将多余的 `/api` 前缀传给 Spring MVC。
 
 生产环境还应增加 HTTPS 配置和证书挂载；本节的 80 端口仅作为首次部署验证基线。
 

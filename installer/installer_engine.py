@@ -1014,7 +1014,7 @@ def nginx_site() -> str:
     index index.html;
 
     location /api/ {
-        proxy_pass http://127.0.0.1:9090;
+        proxy_pass http://127.0.0.1:9090/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1128,7 +1128,7 @@ pike.api.white-list[4]=/api/v1/**
 pike.api.white-list[5]=/webhook/trigger/**
 pike.api.white-list[6]=/brand-config/public
 pike.api.white-list[7]=/brand-config/asset/**
-pike.api.white-list[8]=/api/auth/login
+pike.api.white-list[8]=/auth/login
 autocrud.base-packages=com.polelink
 spring.datasource.url=jdbc:mariadb://127.0.0.1:3306/cict
 spring.datasource.username=cict
