@@ -518,7 +518,14 @@ def task_rustfs(context: InstallContext, task_id: str) -> None:
     # RustFS reads its credentials only at process startup. A rerun may have
     # replaced /etc/default/rustfs, so an already-running service must restart.
     run_command(context, task_id, ["systemctl", "restart", "rustfs"])
-    wait_for_port("127.0.0.1", 9000, 45)
+    wait_for_service_port(
+        context,
+        "rustfs",
+        "127.0.0.1",
+        9000,
+        45,
+        log_paths=(Path("/var/log/rustfs/rustfs.log"),),
+    )
     context.progress(task_id, 88, "等待 RustFS S3 服务就绪")
     create_s3_bucket(context, task_id, context.secrets["rustfs_access_key"], context.secrets["rustfs_secret"], "pike")
     context.log(task_id, "RustFS 存储桶 pike 已就绪")
@@ -633,6 +640,82 @@ def wait_for_port(host: str, port: int, timeout: int) -> None:
             return
         time.sleep(1)
     raise InstallError(f"等待 {host}:{port} 启动超时（{timeout} 秒）")
+
+
+def wait_for_service_port(
+    context: InstallContext,
+    service: str,
+    host: str,
+    port: int,
+    timeout: int,
+    *,
+    log_paths: tuple[Path, ...] = (),
+) -> None:
+    deadline = time.monotonic() + timeout
+    failure_seen_at: float | None = None
+    while time.monotonic() < deadline:
+        if port_open(host, port):
+            return
+        state = systemd_service_state(service)
+        failed = "ActiveState=failed" in state or "SubState=auto-restart" in state
+        if failed:
+            failure_seen_at = failure_seen_at or time.monotonic()
+            if time.monotonic() - failure_seen_at >= 2:
+                detail = service_diagnostics(service, state, log_paths)
+                raise InstallError(f"{service} 启动失败\n{redact_secrets(detail, context.secrets)}")
+        else:
+            failure_seen_at = None
+        time.sleep(1)
+    state = systemd_service_state(service)
+    detail = service_diagnostics(service, state, log_paths)
+    raise InstallError(
+        f"等待 {host}:{port} 启动超时（{timeout} 秒）\n"
+        f"{redact_secrets(detail, context.secrets)}"
+    )
+
+
+def systemd_service_state(service: str) -> str:
+    return run_simple([
+        "systemctl",
+        "show",
+        service,
+        "--property=ActiveState",
+        "--property=SubState",
+        "--property=Result",
+        "--property=ExecMainStatus",
+        "--no-pager",
+    ])
+
+
+def service_diagnostics(service: str, state: str, log_paths: tuple[Path, ...]) -> str:
+    sections = [f"systemd 状态:\n{state or 'unknown'}"]
+    journal = run_simple(["journalctl", "-u", service, "-n", "20", "--no-pager", "--output=cat"])
+    if journal:
+        sections.append(f"最近的 journal 日志:\n{journal[-6000:]}")
+    for path in log_paths:
+        tail = read_file_tail(path)
+        if tail:
+            sections.append(f"{path} 末尾:\n{tail}")
+    return "\n".join(sections)
+
+
+def read_file_tail(path: Path, max_bytes: int = 6000) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace").strip()
+
+
+def redact_secrets(value: str, secrets: dict[str, str]) -> str:
+    for secret in secrets.values():
+        if secret:
+            value = value.replace(secret, "[REDACTED]")
+    return value
 
 
 def rabbitmq_users() -> set[str]:
@@ -940,8 +1023,8 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
-StandardOutput=append:/var/log/rustfs/rustfs.log
-StandardError=append:/var/log/rustfs/rustfs-err.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

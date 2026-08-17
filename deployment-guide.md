@@ -669,8 +669,8 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
-StandardOutput=append:/var/log/rustfs/rustfs.log
-StandardError=append:/var/log/rustfs/rustfs-err.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -688,7 +688,9 @@ sudo systemctl daemon-reload
 1. 确认配置文件：`cat /etc/default/rustfs`
 2. 检查目录权限：`ls -ld /data/rustfs0 /var/log/rustfs`
 3. 手动测试：`source /etc/default/rustfs && /usr/local/bin/rustfs ${RUSTFS_VOLUMES}`
-4. 查看日志：`journalctl -u rustfs -n 50 --no-pager` 或 `cat /var/log/rustfs/rustfs-err.log`
+4. 查看日志：`journalctl -u rustfs -n 50 --no-pager` 和 `tail -n 50 /var/log/rustfs/rustfs.log`
+
+> RustFS 会根据 `RUSTFS_OBS_LOG_DIRECTORY` 自行写入滚动日志。systemd 的 stdout/stderr 必须保持为 journald，不能再指向同一个 `rustfs.log`，否则 RustFS 会因日志输出冲突拒绝启动。
 
 #### 1.7.5 启动并验证
 
