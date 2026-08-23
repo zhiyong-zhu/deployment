@@ -150,7 +150,8 @@ else
 fi
 docker compose version >/dev/null 2>&1 || die "缺少 docker compose 插件"
 
-# Docker 守护进程配置：合并日志轮转与镜像加速器（保留已有键，不覆盖既有配置）
+# Docker 守护进程配置：合并日志轮转与镜像加速器。
+# 显式传入 --registry-mirror 时覆盖已有加速器（用于更换失效地址）；未传入时保留现有配置。
 DAEMON_UPDATED="$(python3 - "$REGISTRY_MIRRORS" <<'PYEOF'
 import json, os, sys
 path = "/etc/docker/daemon.json"
@@ -166,7 +167,7 @@ if "log-driver" not in cfg:
     cfg["log-opts"] = {"max-size": "50m", "max-file": "5"}
     changed = True
 mirrors = [m.strip() for m in (sys.argv[1] or "").split(",") if m.strip()]
-if mirrors and not cfg.get("registry-mirrors"):
+if mirrors and cfg.get("registry-mirrors") != mirrors:
     cfg["registry-mirrors"] = mirrors
     changed = True
 if changed:
