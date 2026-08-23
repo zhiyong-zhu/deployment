@@ -477,6 +477,9 @@ docker compose run --rm --no-deps nginx nginx -t
 
 log "启动全部服务..."
 docker compose up -d
+# conf.d 是目录 bind mount，其内容更新不会触发 compose 重建容器：
+# 显式强制重建 nginx，确保加载的是本轮刚同步的配置而非残留旧配置
+docker compose up -d --force-recreate nginx
 
 log "等待服务就绪..."
 READY=0
