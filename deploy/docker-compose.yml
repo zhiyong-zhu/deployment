@@ -109,6 +109,8 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      # 预签 URL 的 S3 对外地址（浏览器直传用），留空回退容器内地址；见 .env.example
+      CICT_PUBLIC_S3_ENDPOINT: ${CICT_PUBLIC_S3_ENDPOINT:-http://rustfs:9000}
     volumes:
       - ./logs/cict:/data/logs
     depends_on:

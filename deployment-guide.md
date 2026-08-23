@@ -325,6 +325,7 @@ JAVA_TOOL_OPTIONS=-Xms1g -Xmx4g
 | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | RustFS、CICT | S3 API 认证 |
 | `JAVA_TOOL_OPTIONS` | CICT 容器中的 JVM | JVM 堆内存等启动参数 |
 | `CICT_IMAGE_TAG` | Docker Compose | 后端镜像版本标签 |
+| `CICT_PUBLIC_S3_ENDPOINT` | CICT | S3 预签 URL 对外地址（浏览器直传用），与前端访问同协议/主机/端口；留空回退容器内地址 |
 
 #### 3.3.2 后端 Spring Boot 配置 `cict/application.properties`
 
@@ -364,8 +365,11 @@ spring.rabbitmq.port=5672
 spring.rabbitmq.username=${RABBITMQ_DEFAULT_USER}
 spring.rabbitmq.password=${RABBITMQ_DEFAULT_PASS}
 
-# ===== RustFS / S3 配置（Docker 服务名 rustfs） =====
-pike.file.s3.endpoint=http://rustfs:9000
+# ===== RustFS / S3 配置 =====
+# 默认走容器内地址（Docker 服务名 rustfs）。浏览器直传时在 .env 设置 CICT_PUBLIC_S3_ENDPOINT
+# 为对外地址（与前端访问同协议/主机/端口，如 http://192.168.71.128），nginx 把 /pike/ 原样
+# 转发到 RustFS，路径与 Host 均不改写，预签 URL 才能通过 SigV4 校验
+pike.file.s3.endpoint=${CICT_PUBLIC_S3_ENDPOINT:http://rustfs:9000}
 pike.file.s3.bucket=pike
 pike.file.s3.accessKey=${RUSTFS_ACCESS_KEY}
 pike.file.s3.secretKey=${RUSTFS_SECRET_KEY}
@@ -514,6 +518,13 @@ http {
 `nginx/conf.d/cict.conf`：
 
 ```nginx
+# WebSocket 升级透传：Connection 头需随 Upgrade 头有无动态取值。
+# map 必须位于 http 上下文，本文件被 nginx.conf include 在 http{} 内，故放在文件顶部。
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80 default_server;
     server_name _;
@@ -531,6 +542,39 @@ server {
         proxy_read_timeout 120s;
     }
 
+    # SockJS/WebSocket 端点（后端 Spring 的 /ws）。不代理时 POST /ws/** 落到静态 location
+    # 返回 405、websocket 升级拿到 index.html；xhr_streaming 等降级传输还要求关闭缓冲与 gzip。
+    location ^~ /ws {
+        proxy_pass http://cict:9090;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # S3 浏览器直传/下载：桶 pike 的 path-style 预签 URL（http://<对外地址>/pike/<key>）。
+    # proxy_pass 不带 URI 路径，请求路径与 Host 原样转发到 RustFS，SigV4 签名校验才会通过
+    # （改写路径或 Host 都会 403 SignatureDoesNotMatch）。
+    # ^~ 使本前缀优先于下方静态后缀正则，否则 .png 等对象会被 try_files 吞成 index.html。
+    location ^~ /pike/ {
+        proxy_pass http://rustfs:9000;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
     location / {
         try_files $uri /index.html;
     }
@@ -543,6 +587,10 @@ server {
 ```
 
 > 前端和 API 必须位于同一个默认虚拟主机中。`proxy_pass` 中的 `cict` 是 Docker Compose 服务名；结尾斜杠会把外部 `/api/auth/login` 映射为后端 `/auth/login`，避免将多余的 `/api` 前缀传给 Spring MVC。
+
+> **浏览器直传文件**：前端用后端颁发的预签 URL 直接 PUT 到 `http://<对外地址>/pike/<key>`，nginx 原样转发到 RustFS，9000 端口无需对外暴露。生效前提有两条：
+> 1. `.env` 中 `CICT_PUBLIC_S3_ENDPOINT` 设为与前端访问一致的地址（如 `http://192.168.71.128`），后端用它签 URL（见 3.3.1/3.3.2）；
+> 2. 后端 S3 客户端必须用 **path-style** 寻址（桶名在路径中而非拼进主机名）。若预签 URL 仍是 `http://pike.<地址>/...` 形式，需在后端 S3Client/S3Presigner 构建处开启 path-style（AWS SDK Java v2 为 `forcePathStyle(true)`）。
 
 生产环境还应增加 HTTPS 配置和证书挂载；本节的 80 端口仅作为首次部署验证基线。
 
