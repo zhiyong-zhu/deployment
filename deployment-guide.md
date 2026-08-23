@@ -225,6 +225,8 @@ sudo mkdir -p /data/app/cict-docker/{cict,nginx/{conf.d,html},mariadb,data/{mari
 sudo chown -R "$(id -un):$(id -gn)" /data/app/cict-docker
 # Dockerfile 中的后端用户固定为 UID/GID 10001
 sudo chown -R 10001:10001 /data/app/cict-docker/logs/cict
+# RustFS 官方镜像以非 root 用户（UID 10001）运行，数据与日志目录需允许其写入，否则启动即 Permission denied
+sudo chown -R 10001:10001 /data/app/cict-docker/data/rustfs /data/app/cict-docker/logs/rustfs
 ```
 
 ### 3.3 配置文件

@@ -315,6 +315,13 @@ RUN_GROUP="$(id -gn "$RUN_USER")"
 chown -R "$RUN_USER:$RUN_GROUP" "$TARGET_DIR"
 # Dockerfile 中后端用户固定为 UID/GID 10001
 chown -R 10001:10001 "$TARGET_DIR/logs/cict"
+# RustFS 官方镜像以非 root 用户运行（本版本为 UID 10001），数据与日志目录必须允许其写入，
+# 否则启动时报 Permission denied 并进入重启循环。优先从镜像 Config.User 读取实际 UID。
+RUSTFS_IMAGE="$(grep -E '^    image: *rustfs/rustfs:' "$TARGET_DIR/docker-compose.yml" | awk '{print $2}' | head -1)"
+RUSTFS_UID="$(docker image inspect "${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-rc.2}" --format '{{.Config.User}}' 2>/dev/null || true)"
+case "$RUSTFS_UID" in ''|*[!0-9]*) RUSTFS_UID="10001" ;; esac
+log "RustFS 容器运行用户 UID: $RUSTFS_UID，授权其数据与日志目录"
+chown -R "$RUSTFS_UID:$RUSTFS_UID" "$TARGET_DIR/data/rustfs" "$TARGET_DIR/logs/rustfs"
 
 # ===== 6. 启动服务 =====
 cd "$TARGET_DIR"
