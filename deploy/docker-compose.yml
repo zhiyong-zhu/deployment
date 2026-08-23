@@ -139,6 +139,7 @@ services:
       - "${NGINX_PORT}:80"
     depends_on:
       - cict
+      - rustfs
     networks:
       - cict-net
 
