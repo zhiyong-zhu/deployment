@@ -382,23 +382,66 @@ log "校验 Compose 配置..."
 docker compose config --quiet
 
 if [[ "$ONLINE" -eq 1 ]]; then
-  # 本脚本输出经 tee 追加进安装报告（非终端），docker 的逐层进度事件会每个刷新追加
-  # 一行、刷爆日志：统一改为 --quiet 静默拉取、构建输出落盘，失败时回显末尾帮助排障。
-  # 拉取须先于下方 nginx -t：compose run 在镜像缺失时会隐式拉取，进度同样会刷屏
+  # 拉取进度处理：非终端下 docker 每个进度事件追加一行会刷爆安装报告，纯 --quiet 又让
+  # 慢速网络的长时间拉取毫无反馈。用过滤器聚合各层 Downloading 进度，每 10 秒最多输出
+  # 一行汇总；层完成/摘要/错误等低频状态行原样透传。拉取须先于下方 nginx -t：compose run
+  # 在镜像缺失时会隐式拉取，进度同样会刷屏。
+  PROGRESS_FILTER="$(mktemp /tmp/pull-progress.XXXXXX.py)"
+  cat >"$PROGRESS_FILTER" <<'PYEOF'
+import re, sys, time
+last, cur, tot = 0.0, {}, {}
+pat = re.compile(r'Downloading \[[^]]*\]\s*([0-9.]+)([kMG]?)B\s*/\s*([0-9.]+)([kMG]?)B')
+mult = {"": 1, "k": 1e3, "M": 1e6, "G": 1e9}
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    m = pat.search(line)
+    if m:
+        lid = line.split(":", 1)[0]
+        cur[lid] = float(m.group(1)) * mult[m.group(2)]
+        tot[lid] = float(m.group(3)) * mult[m.group(4)]
+        now = time.time()
+        if now - last >= 10:
+            last = now
+            c, t = sum(cur.values()), sum(tot.values())
+            pct = c / t * 100 if t else 0
+            print("[install] 拉取进度: %.1fMB / %.1fMB（%.0f%%）" % (c / 1e6, t / 1e6, pct), flush=True)
+        continue
+    if "Extracting [" in line:  # 解包进度同样高频；层 Download complete 已可见
+        continue
+    print(line, flush=True)
+PYEOF
   BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$TARGET_DIR/cict/Dockerfile" | head -1)"
   if [[ -n "$BASE_IMAGE" ]]; then
-    log "拉取后端基础镜像 $BASE_IMAGE（静默，无逐行进度）..."
-    docker pull --quiet "$BASE_IMAGE"
+    log "拉取后端基础镜像 $BASE_IMAGE ..."
+    if ! docker pull "$BASE_IMAGE" 2>&1 | python3 "$PROGRESS_FILTER"; then
+      die "拉取基础镜像 $BASE_IMAGE 失败，请检查网络后重跑安装器"
+    fi
   fi
-  log "拉取官方镜像 mariadb/redis/rabbitmq/rustfs/nginx（静默）..."
-  docker compose pull --quiet mariadb redis rabbitmq rustfs nginx
+  log "拉取官方镜像 mariadb/redis/rabbitmq/rustfs/nginx ..."
+  if ! docker compose pull mariadb redis rabbitmq rustfs nginx 2>&1 | python3 "$PROGRESS_FILTER"; then
+    die "拉取官方镜像失败，请检查网络后重跑安装器"
+  fi
+  # 构建输出整体落盘避免 buildkit 逐行进度刷屏，另起心跳每 15 秒报告一次最近进度
   BUILD_LOG="$(mktemp /tmp/cict-build.XXXXXX)"
-  log "构建后端镜像 cict/backend:$BUNDLE_TAG（进度写入 $BUILD_LOG）..."
-  if ! docker compose build cict >"$BUILD_LOG" 2>&1; then
+  log "构建后端镜像 cict/backend:$BUNDLE_TAG ..."
+  docker compose build cict >"$BUILD_LOG" 2>&1 &
+  BUILD_PID=$!
+  ELAPSED=0
+  while kill -0 "$BUILD_PID" 2>/dev/null; do
+    sleep 15
+    ELAPSED=$((ELAPSED + 15))
+    LAST_PROGRESS="$(grep -oE '[0-9.]+[kMG]?B */ *[0-9.]+[kMG]?B' "$BUILD_LOG" 2>/dev/null | tail -1 || true)"
+    if [[ -n "$LAST_PROGRESS" ]]; then
+      log "构建进行中 ${ELAPSED}s（最近下载进度: $LAST_PROGRESS）"
+    else
+      log "构建进行中 ${ELAPSED}s ..."
+    fi
+  done
+  if ! wait "$BUILD_PID"; then
     tail -n 40 "$BUILD_LOG" || true
     die "后端镜像构建失败，完整日志: $BUILD_LOG"
   fi
-  log "后端镜像构建完成"
+  log "后端镜像构建完成（约 ${ELAPSED}s，日志: $BUILD_LOG）"
 fi
 
 # 离线模式镜像已在第 2 步 docker load 载入，在线模式刚拉取完成
