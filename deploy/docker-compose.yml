@@ -68,6 +68,8 @@ services:
     image: rustfs/rustfs:1.0.0-rc.2
     container_name: cict-rustfs
     restart: unless-stopped
+    # 官方镜像要求显式传入存储路径参数，缺失会退出并进入重启循环（官方文档: rustfs/rustfs /data）
+    command: ["/data"]
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}

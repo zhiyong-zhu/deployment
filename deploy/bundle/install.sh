@@ -34,7 +34,8 @@ usage() {
   --online          在线模式，需同时提供 --app-jar / --frontend / --tag
   --docker-apt-mirror BASE  指定 Docker apt 源基地址（如 https://mirrors.aliyun.com/docker-ce）。
                            默认自动探测：官方 → 阿里云 → 中科大 → 清华，用第一个可达的源
-  --registry-mirror URL    Docker 镜像加速器，可多次传入（拉取镜像被拒/超时时使用）
+  --registry-mirror URL    Docker 镜像加速器，可多次传入。默认自动探测：Docker Hub 直连可用则
+                           不配置，否则按 1ms → DaoCloud → 1Panel → rat.dev 顺序选第一个可用加速器
   -h, --help        显示本帮助
 USAGE
 }
@@ -149,6 +150,48 @@ else
   systemctl is-active --quiet docker || systemctl start docker
 fi
 docker compose version >/dev/null 2>&1 || die "缺少 docker compose 插件"
+
+# 镜像源连通性探测（仅在线模式）：Docker Hub 直连可用则不配置加速器，
+# 否则按序探测公共加速器并把第一个可用的写入 REGISTRY_MIRRORS。
+# Registry v2 协议端点 /v2/ 返回 200（匿名）或 401（要求认证）都视为存活。
+probe_registry_mirrors() {
+  if ! command -v curl >/dev/null 2>&1; then
+    apt-get install -y -qq curl >/dev/null 2>&1 || { log "警告: 无 curl 且安装失败，跳过镜像源探测"; return; }
+  fi
+  probe_url() {
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 "$1" || echo 000)"
+    [[ "$code" = "200" || "$code" = "401" ]]
+  }
+  if [[ -n "$REGISTRY_MIRRORS" ]]; then
+    if probe_url "${REGISTRY_MIRRORS%%,*}/v2/"; then
+      log "镜像加速器探测可达: $REGISTRY_MIRRORS"
+    else
+      log "警告: 指定的镜像加速器探测不可达，仍按指定值配置（内部源可能不支持匿名探测）"
+    fi
+    return
+  fi
+  if probe_url "https://registry-1.docker.io/v2/"; then
+    log "镜像源检测: Docker Hub 直连可用，不配置加速器"
+    return
+  fi
+  log "镜像源检测: Docker Hub 直连不可用，开始探测公共加速器..."
+  local m
+  for m in "https://docker.1ms.run" "https://docker.m.daocloud.io" \
+           "https://docker.1panel.live" "https://hub.rat.dev"; do
+    if probe_url "$m/v2/"; then
+      REGISTRY_MIRRORS="$m"
+      log "镜像源检测: 使用加速器 $m"
+      return
+    fi
+    log "镜像源 $m 不可达，尝试下一个..."
+  done
+  log "警告: 所有镜像源均不可达，后续拉取镜像可能失败；可用 --registry-mirror 指定内部镜像源"
+}
+
+if [[ "$ONLINE" -eq 1 ]]; then
+  probe_registry_mirrors
+fi
 
 # Docker 守护进程配置：合并日志轮转与镜像加速器。
 # 显式传入 --registry-mirror 时覆盖已有加速器（用于更换失效地址）；未传入时保留现有配置。
@@ -289,10 +332,20 @@ docker compose up -d
 
 log "等待服务就绪..."
 READY=0
+FAIL_FAST=""
 for _ in $(seq 1 60); do
   ok=1
   for name in cict-mariadb cict-redis cict-rabbitmq cict-rustfs cict-app cict-nginx; do
-    [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)" = "running" ]] || ok=0
+    state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+    [[ "$state" = "running" ]] || ok=0
+    # 重启循环 = 确定性崩溃，继续等待没有意义，快速失败
+    if [[ "$state" = "restarting" ]]; then
+      rc="$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo 0)"
+      if [[ "${rc:-0}" -ge 3 ]]; then
+        FAIL_FAST="$name（已重启 $rc 次）"
+        break 2
+      fi
+    fi
   done
   for name in cict-mariadb cict-redis cict-rabbitmq; do
     [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || echo none)" = "healthy" ]] || ok=0
@@ -301,7 +354,20 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 docker compose ps
-[[ "$READY" -eq 1 ]] || die "部分服务未在 5 分钟内就绪，请查看上方状态与 docker compose logs 排障"
+if [[ "$READY" -ne 1 ]]; then
+  log "以下服务未就绪，打印最近日志辅助排障："
+  for name in cict-mariadb cict-redis cict-rabbitmq cict-rustfs cict-app cict-nginx; do
+    state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+    health="$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || true)"
+    if [[ "$state" = "running" && ( -z "$health" || "$health" = "healthy" ) ]]; then
+      continue
+    fi
+    log "===== $name（状态: $state${health:+，健康: $health}）最近 30 行日志 ====="
+    docker logs --tail 30 "$name" 2>&1 || true
+  done
+  [[ -n "$FAIL_FAST" ]] && die "服务处于确定性重启循环: $FAIL_FAST，详见上方日志"
+  die "部分服务未在 5 分钟内就绪，详见上方日志；完整日志: docker compose logs <服务>"
+fi
 
 # ===== 7. 创建 RabbitMQ 管理账号（幂等） =====
 log "配置 RabbitMQ 管理账号..."

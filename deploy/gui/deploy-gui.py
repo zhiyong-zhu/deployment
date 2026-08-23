@@ -251,7 +251,7 @@ HTML = r"""<!DOCTYPE html>
   <div class="grid" style="margin-top:12px">
    <div class="field"><label>Docker apt 源基地址（留空自动探测；国内网络下载失败时填，如 mirrors.aliyun.com/docker-ce）</label>
     <input id="k:docker_apt_mirror" type="text" placeholder="https://mirrors.aliyun.com/docker-ce"></div>
-   <div class="field"><label>镜像加速器（拉取 Docker Hub 镜像超时/被拒时填，可留空）</label>
+   <div class="field"><label>镜像加速器（留空自动探测：Docker Hub 直连可用则不配，否则选 1ms/DaoCloud/1Panel 第一个可用）</label>
     <input id="k:registry_mirror" type="text" placeholder="https://<你的镜像加速地址>"></div>
   </div><br>
   <button class="btn green" id="runbtn" onclick="runInstall()">开始安装</button>

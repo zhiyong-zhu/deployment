@@ -152,7 +152,7 @@ sudo ./bundle/install.sh --online \
 
 - 幂等：重复执行保留 `.env` 密码与 `data/` 数据，因此**日常升级 = 重跑本命令并换新 tag**（版本号必须唯一），详见附录 A.3
 - 已装 Docker 的机器加 `--skip-engine`
-- **国内网络**：Docker apt 源自动按 官方 → 阿里云 → 中科大 → 清华 顺序探测回退（`download.docker.com` 被重置时无需手工干预）；拉取镜像超时/被拒时加 `--registry-mirror <加速器地址>`（可多次传入）
+- **国内网络**：Docker apt 源自动按 官方 → 阿里云 → 中科大 → 清华 顺序探测回退；镜像源先探测 Docker Hub 直连，不通则自动按 1ms → DaoCloud → 1Panel 顺序选用第一个可用加速器（探测结果会打印在日志中）。都不满足时用 `--registry-mirror <加速器地址>` 显式指定（可多次传入，显式值会覆盖已有配置）
 - 仅剩的手工步骤：3.10 创建 RustFS 存储桶 `pike`（脚本结束的报告中已给出操作提示）
 
 **图形界面（可选）**：不习惯命令行的操作者可使用部署向导：
@@ -471,6 +471,7 @@ EOF
 ```nginx
 user  nginx;
 worker_processes  auto;
+worker_rlimit_nofile 10240;
 error_log  /var/log/nginx/error.log warn;
 pid        /var/run/nginx.pid;
 
@@ -605,6 +606,8 @@ services:
     image: rustfs/rustfs:1.0.0-rc.2
     container_name: cict-rustfs
     restart: unless-stopped
+    # 官方镜像要求显式传入存储路径参数，缺失会退出并进入重启循环（官方文档: rustfs/rustfs /data）
+    command: ["/data"]
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
