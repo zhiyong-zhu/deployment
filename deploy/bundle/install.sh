@@ -357,6 +357,23 @@ if [[ ! -f "$TARGET_DIR/.env" || "$FORCE_ENV" -eq 1 ]]; then
 else
   log "保留现有 .env，同步镜像版本标签为 $BUNDLE_TAG"
   sed -i "s/^CICT_IMAGE_TAG=.*/CICT_IMAGE_TAG=$BUNDLE_TAG/" "$TARGET_DIR/.env"
+  # 存量部署补齐 .env.example 新增的变量（保留已有值不动）：
+  # 否则新增配置项（如 CICT_PUBLIC_S3_ENDPOINT）永远到不了已有 .env，对应功能静默失效
+  local_env_key() { grep -E "^$1=" "$TARGET_DIR/.env" >/dev/null 2>&1 && return 0 || return 1; }
+  while IFS= read -r ex_line || [[ -n "$ex_line" ]]; do
+    [[ "$ex_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+    ex_key="${BASH_REMATCH[1]}"
+    if ! local_env_key "$ex_key"; then
+      if [[ "$ex_line" =~ __RANDOM_HEX_([0-9]+)__ ]]; then
+        n="${BASH_REMATCH[1]}"
+        ex_line="${ex_line//__RANDOM_HEX_${n}__/$(openssl rand -hex "$n")}"
+      fi
+      ex_line="${ex_line//__CICT_IMAGE_TAG__/$BUNDLE_TAG}"
+      printf '%s\n' "$ex_line" >> "$TARGET_DIR/.env"
+      log "已补齐 .env 缺失变量: $ex_key"
+    fi
+  done < "$SRC/.env.example"
+  chmod 600 "$TARGET_DIR/.env"
 fi
 
 # ===== 5. 目录属主 =====
