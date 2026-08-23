@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: ['deploy/**', '.github/workflows/build.yml']
+  pull_request:
+    paths: ['deploy/**', '.github/workflows/build.yml']
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: 语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell 语法（bash -n）
+        run: |
+          shopt -s nullglob
+          for f in deploy/bundle/*.sh installer/*.sh; do
+            echo "checking $f"; bash -n "$f"
+          done
+      - name: Python 语法
+        run: python3 -m py_compile deploy/gui/deploy-gui.py
+      - name: ShellCheck（建议级，不阻断）
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck deploy/bundle/*.sh || echo '::warning::ShellCheck 存在告警，详见上方输出'
+
+  validate:
+    name: Compose 与 GUI 校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config（注入测试变量）
+        working-directory: deploy
+        run: |
+          sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1=x/' .env.example > /tmp/test.env
+          docker compose --env-file /tmp/test.env config --quiet
+      - name: 部署向导冒烟测试
+        run: |
+          python3 deploy/gui/deploy-gui.py > /tmp/gui.log 2>&1 &
+          GUI_PID=$!
+          sleep 2
+          MODE="$(curl -sf http://127.0.0.1:8788/api/config | python3 -c 'import json,sys; print(json.load(sys.stdin)["mode"])')"
+          test "$MODE" = "online"
+          kill "$GUI_PID"
+          grep -q "模式: online" /tmp/gui.log
+
+  build:
+    name: 构建便携安装器
+    runs-on: ubuntu-latest
+    needs: [lint, validate]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 生成 cict-installer.run
+        run: |
+          ./deploy/bundle/make-portable.sh
+          # 自解压链路自测：--help 应输出安装脚本用法
+          ./deploy/bundle/dist/cict-installer.run --help | head -1 | grep -q "用法"
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cict-installer
+          path: |
+            deploy/bundle/dist/cict-installer.run
+            deploy/bundle/dist/cict-installer.run.sha256
+          if-no-files-found: error
+      - name: 发布到 GitHub Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            deploy/bundle/dist/cict-installer.run \
+            deploy/bundle/dist/cict-installer.run.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes

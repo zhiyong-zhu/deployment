@@ -161,7 +161,7 @@ sudo ./bundle/install.sh --online \
 
 # 目标机上（在线部署，参数与上文 install.sh 完全一致）
 sudo ./cict-installer.run --online --app-jar cict-app.jar --frontend dist.zip --tag 2.1.2
-sudo ./cict-installer.run --gui      # 或直接启动 Web 部署向导
+sudo ./cict-installer.run            # 不带参数直接启动 Web 部署向导（自动尝试打开浏览器）
 ```
 
 原理是自解压脚本（文本头 + tar.gz 负载，按字节切分），无需任何运行时依赖；离线部署仍使用第 4 章的完整离线包（GB 级镜像不适合内嵌单文件）。

@@ -24,8 +24,8 @@ cat > "$HEADER" <<'HDR'
 #!/usr/bin/env bash
 # CICT 便携安装器（单文件自解压，内嵌全部部署文件与安装脚本）
 #
-# 在线部署: sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号>
-# 图形界面: sudo ./cict-installer.run --gui   （浏览器 http://127.0.0.1:8788，远程走 SSH 隧道）
+# Web 向导: sudo ./cict-installer.run            （不带参数即启动，浏览器 http://127.0.0.1:8788）
+# 命令行  : sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号>
 # 其余参数与 deploy/bundle/install.sh 完全一致（--help 查看）
 # 离线部署请使用 build-bundle.sh 产出的完整离线安装包（含镜像与 Engine 离线包）。
 set -euo pipefail
@@ -33,7 +33,14 @@ PAYLOAD_START=__HCOUNT__
 EXTRACT_DIR="$(mktemp -d)"
 trap 'rm -rf "$EXTRACT_DIR"' EXIT
 tail -n +"$((PAYLOAD_START + 1))" "$0" | tar -xzf - -C "$EXTRACT_DIR"
-if [[ "${1:-}" = "--gui" ]]; then
+if [[ $# -eq 0 || "${1:-}" = "--gui" ]]; then
+  echo "启动 Web 部署向导: http://127.0.0.1:8788"
+  echo "远程操作先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@<服务器IP>"
+  echo "当前用户: $(id -un)（执行安装需要 sudo 启动本程序）"
+  ( sleep 1
+    xdg-open http://127.0.0.1:8788 >/dev/null 2>&1 \
+      || open http://127.0.0.1:8788 >/dev/null 2>&1 \
+      || true ) &
   exec python3 "$EXTRACT_DIR/gui/deploy-gui.py"
 fi
 exec bash "$EXTRACT_DIR/bundle/install.sh" "$@"

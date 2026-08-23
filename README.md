@@ -21,8 +21,8 @@ sudo ./bundle/install.sh --online --app-jar <jar> --frontend <zip或目录> --ta
 
 ```bash
 cd deploy/bundle && ./make-portable.sh
-sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <唯一版本号>   # 目标机
-sudo ./cict-installer.run --gui                                                          # 或 Web 向导
+sudo ./cict-installer.run            # 目标机：不带参数直接启动 Web 部署向导
+sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <唯一版本号>   # 或命令行直装
 ```
 
 离线部署（联网机器制包，与目标机同架构同系统版本，已装 Docker、unzip、dpkg-dev）：
@@ -41,6 +41,10 @@ cd cict-offline-bundle && sudo ./install.sh
 ```
 
 详见 [deploy/bundle/README.md](./deploy/bundle/README.md)。密码不进安装包，由目标机安装时随机生成。
+
+## CI（GitHub Actions）
+
+`.github/workflows/build.yml`：`deploy/` 有改动时自动执行语法检查、compose 编排校验、部署向导冒烟测试，并构建 `cict-installer.run` 上传为构建产物；推送 `v*` 标签时自动把便携安装器发布到 GitHub Release。
 
 ## Ubuntu 直装安装器（备选路线）
 

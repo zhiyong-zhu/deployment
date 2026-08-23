@@ -15,8 +15,8 @@
 
 ```bash
 ./make-portable.sh                                   # 联网机器生成
-sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <版本>   # 目标机在线部署
-sudo ./cict-installer.run --gui                      # 或启动 Web 部署向导
+sudo ./cict-installer.run                            # 目标机：不带参数直接启动 Web 部署向导
+sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <版本>   # 或命令行直装
 ```
 
 参数与 `install.sh` 完全一致。离线部署不适用（GB 级镜像不内嵌），仍使用 `build-bundle.sh` 的完整离线包。
