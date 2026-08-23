@@ -91,14 +91,17 @@ log "安装模式: $([[ "$ONLINE" -eq 1 ]] && echo 在线 || echo 离线)；安�
 # ===== 1. Docker Engine =====
 install_engine_online() {
   log "从 Docker apt 源安装 Docker Engine..."
-  apt-get update -qq
-  apt-get install -y -qq ca-certificates curl
+  # apt 网络操作统一加超时与重试：源连接挂死时 30 秒内失败并重试，而不是无限等待
+  local apt_opts=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2)
+  apt-get update "${apt_opts[@]}"
+  apt-get install -y "${apt_opts[@]}" ca-certificates curl
   install -m 0755 -d /etc/apt/keyrings
   # 仓库路径按发行版区分（ubuntu/debian），codename 取自当前系统
   . /etc/os-release
   DISTRO_ID="${ID:-ubuntu}"
   DISTRO_CODENAME="${VERSION_CODENAME:-}"
-  # 国内网络下官方源常被重置：按 官方 → 阿里云 → 中科大 → 清华 顺序探测，用第一个可达源
+  # 国内网络下官方源常被重置或传输挂死：按 官方 → 阿里云 → 中科大 → 清华 顺序尝试，
+  # 以"索引下载成功"为选定标准（GPG 探测可达不代表索引/包能正常下载），失败自动换源
   if [[ -n "$DOCKER_APT_MIRROR" ]]; then
     CANDIDATES=("$DOCKER_APT_MIRROR")
   else
@@ -112,19 +115,22 @@ install_engine_online() {
   CHOSEN=""
   for base in "${CANDIDATES[@]}"; do
     log "尝试 Docker apt 源: $base（$DISTRO_ID/$DISTRO_CODENAME）"
-    if curl -fsSL --connect-timeout 8 --retry 1 "${base}/linux/${DISTRO_ID}/gpg" -o /etc/apt/keyrings/docker.asc; then
+    if ! curl -fsSL --connect-timeout 8 --retry 1 "${base}/linux/${DISTRO_ID}/gpg" -o /etc/apt/keyrings/docker.asc; then
+      log "该源不可达，尝试下一个..."
+      continue
+    fi
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $base/linux/$DISTRO_ID \
+$DISTRO_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+    if apt-get update "${apt_opts[@]}"; then
       CHOSEN="$base"
       break
     fi
-    log "该源不可达，尝试下一个..."
+    log "该源索引下载失败/超时，尝试下一个..."
   done
-  [[ -n "$CHOSEN" ]] || die "所有 Docker apt 源均不可达。请检查网络，或用 --docker-apt-mirror 指定可用的源基地址"
+  [[ -n "$CHOSEN" ]] || die "所有 Docker apt 源均不可用。请检查网络，或用 --docker-apt-mirror 指定可用的源基地址"
   log "使用 Docker apt 源: $CHOSEN/linux/$DISTRO_ID"
-  chmod a+r /etc/apt/keyrings/docker.asc
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $CHOSEN/linux/$DISTRO_ID \
-$DISTRO_CODENAME stable" > /etc/apt/sources.list.d/docker.list
-  apt-get update -qq
-  apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+  apt-get install -y "${apt_opts[@]}" docker-ce docker-ce-cli containerd.io \
     docker-buildx-plugin docker-compose-plugin
   systemctl enable --now docker
 }
