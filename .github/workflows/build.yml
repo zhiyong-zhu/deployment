@@ -58,6 +58,8 @@ jobs:
     name: 构建便携安装器
     runs-on: ubuntu-latest
     needs: [lint, validate]
+    permissions:
+      contents: write   # gh release create 需要对仓库的写权限
     steps:
       - uses: actions/checkout@v4
       - name: 生成 cict-installer.run
