@@ -36,7 +36,9 @@ jobs:
       - name: docker compose config（注入测试变量）
         working-directory: deploy
         run: |
-          sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1=x/' .env.example > /tmp/test.env
+          # 只把含 __占位符__ 的行替换为测试值 x；端口/地址等本身合法的值原样保留，
+          # 否则端口映射变成 "x:80" 会报 invalid hostPort
+          sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)=.*__.*/\1=x/' .env.example > /tmp/test.env
           docker compose --env-file /tmp/test.env config --quiet
       - name: 部署向导冒烟测试
         run: |
