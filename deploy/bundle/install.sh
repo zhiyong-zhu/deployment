@@ -145,6 +145,11 @@ install_engine_offline() {
 if ! command -v docker >/dev/null 2>&1; then
   [[ "$SKIP_ENGINE" -eq 1 ]] && die "未安装 Docker 且指定了 --skip-engine"
   if [[ "$ONLINE" -eq 1 ]]; then install_engine_online; else install_engine_offline; fi
+  # 与文档 3.5 一致：把发起安装的用户加入 docker 组（重新登录后免 sudo；docker 组等同 root 权限，仅授予受信任运维用户）
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] && ! id -nG "$SUDO_USER" | grep -qw docker; then
+    usermod -aG docker "$SUDO_USER"
+    log "已将 $SUDO_USER 加入 docker 组（重新登录后 docker 命令免 sudo）"
+  fi
 else
   log "Docker 已安装: $(docker --version)"
   systemctl is-active --quiet docker || systemctl start docker
@@ -279,10 +284,14 @@ install -m 0644 "$SRC_APP_JAR" "$TARGET_DIR/cict/app.jar.new"
 mv -f "$TARGET_DIR/cict/app.jar.new" "$TARGET_DIR/cict/app.jar"
 install -m 0644 "$SRC/nginx/nginx.conf" "$TARGET_DIR/nginx/"
 install -m 0644 "$SRC/nginx/conf.d/cict.conf" "$TARGET_DIR/nginx/conf.d/"
-rm -rf "$TARGET_DIR/nginx/html.new"
-cp -a "$SRC_HTML" "$TARGET_DIR/nginx/html.new"
-rm -rf "$TARGET_DIR/nginx/html"
-mv "$TARGET_DIR/nginx/html.new" "$TARGET_DIR/nginx/html"
+# 就地同步前端（清空内容后复制，不替换目录本身）：
+# 目录 inode 保持不变，运行中容器的 bind mount 才不会指向已删除的孤儿目录（症状: 宿主机文件正常但容器 500）
+mkdir -p "$TARGET_DIR/nginx/html"
+find "$TARGET_DIR/nginx/html" -mindepth 1 -delete
+cp -a "$SRC_HTML/." "$TARGET_DIR/nginx/html/"
+# mktemp -d 产生的 700 权限会被 cp -a 带入，容器内 nginx 用户不可读 → try_files 循环 → 500
+[[ -f "$TARGET_DIR/nginx/html/index.html" ]] || die "前端目录缺少 index.html，请检查 --frontend 产物"
+chmod -R a+rX "$TARGET_DIR/nginx/html"
 if [[ "$ONLINE" -eq 1 && -n "${FRONTEND_TMP:-}" && "$FRONTEND_TMP" != "$FRONTEND" ]]; then
   rm -rf "$FRONTEND_TMP"
 fi
@@ -357,6 +366,10 @@ for _ in $(seq 1 60); do
   for name in cict-mariadb cict-redis cict-rabbitmq; do
     [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || echo none)" = "healthy" ]] || ok=0
   done
+  # cict 容器无 healthcheck，用端口探测确认 Spring Boot 已真正监听 9090（容器 running ≠ 应用就绪）
+  if [[ "$ok" -eq 1 ]]; then
+    docker exec cict-app bash -c 'exec 3<>/dev/tcp/127.0.0.1/9090' 2>/dev/null || ok=0
+  fi
   if [[ "$ok" -eq 1 ]]; then READY=1; break; fi
   sleep 5
 done
@@ -407,7 +420,8 @@ cat <<EOF
      ssh -L 9001:127.0.0.1:9001 <用户>@${SERVER_IP:-<服务器IP>}
      浏览器访问 http://127.0.0.1:9001，使用 .env 中的 RUSTFS_ACCESS_KEY/SECRET_KEY 登录后创建
   2. 管理端口默认只绑定 127.0.0.1，远程访问一律走 SSH 隧道（RabbitMQ 15672、RustFS 9000/9001）
-  3. 日常管理: cd $TARGET_DIR && docker compose ps / logs -f <服务>
+  3. 查看服务状态: cd $TARGET_DIR 后执行 docker compose ps
+     跟踪服务日志: docker compose logs -f <服务名>（服务名: mariadb/redis/rabbitmq/rustfs/cict/nginx）
   4. 后续升级: 在线环境重跑本命令并换新 tag；离线环境用新包重跑。详见部署指南附录 A.3
 
 =======================================================

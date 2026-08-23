@@ -340,9 +340,10 @@ spring.datasource.password=${MARIADB_PASSWORD}
 spring.quartz.properties.org.quartz.jobStore.tablePrefix=qrtz_
 
 # ===== Redis 配置（Spring Boot 2.x） =====
-spring.redis.host=redis
-spring.redis.port=6379
-spring.redis.password=${REDIS_PASSWORD}
+# Spring Boot 3.x 命名空间为 spring.data.redis.*（2.x 应用改为 spring.redis.*）
+spring.data.redis.host=redis
+spring.data.redis.port=6379
+spring.data.redis.password=${REDIS_PASSWORD}
 
 # ===== RabbitMQ 配置 =====
 spring.rabbitmq.host=rabbitmq
@@ -365,7 +366,7 @@ server.port=9090
 EOF
 ```
 
-> Spring Boot 会从进程环境解析 `${MARIADB_PASSWORD}` 等占位符。与直接部署不同，Docker 环境中的数据库、Redis、RabbitMQ 和 RustFS 地址必须使用 Compose 服务名。若项目使用 Spring Boot 3.x，请将 `spring.redis.*` 改为 `spring.data.redis.*`，并以项目实际配置元数据为准。
+> Spring Boot 会从进程环境解析 `${MARIADB_PASSWORD}` 等占位符。与直接部署不同，Docker 环境中的数据库、Redis、RabbitMQ 和 RustFS 地址必须使用 Compose 服务名。当前后端为 Spring Boot 3.x，Redis 配置必须使用 `spring.data.redis.*` 命名空间——写成 2.x 的 `spring.redis.*` 会被静默忽略、回退连接 `localhost:6379`，应用启动即崩溃。
 
 密码传递链路是：`.env` → `docker-compose.yml` 的 `environment` → CICT 容器环境变量 → Spring Boot 解析 `application.properties` 中的 `${...}`。Compose 读取 `.env` 并不等于自动把全部变量送进容器，所以 3.4 的 `cict.environment` 必须显式列出应用需要的每个变量。
 
@@ -1810,9 +1811,9 @@ spring.datasource.password=${CICT_DATABASE_PASSWORD}
 spring.quartz.properties.org.quartz.jobStore.tablePrefix=qrtz_
 
 # ===== Redis 配置 =====
-# Spring Boot 2.x 使用 spring.redis.*；若项目已升级到 3.x，请改为 spring.data.redis.*
-spring.redis.host=127.0.0.1
-spring.redis.port=6379
+# Spring Boot 3.x 使用 spring.data.redis.*；2.x 应用改为 spring.redis.*
+spring.data.redis.host=127.0.0.1
+spring.data.redis.port=6379
 
 # ===== RabbitMQ 配置 =====
 spring.rabbitmq.host=127.0.0.1

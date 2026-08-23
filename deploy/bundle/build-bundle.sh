@@ -107,6 +107,7 @@ else
   die "前端产物中找不到 index.html: $FRONTEND"
 fi
 cp -a "$FRONTEND_SOURCE/." "$BUNDLE_DIR/project/nginx/html/"
+chmod -R a+rX "$BUNDLE_DIR/project/nginx/html"
 FRONTEND_TMP=""
 
 install -m 0755 "$SCRIPT_DIR/install.sh" "$BUNDLE_DIR/install.sh"
