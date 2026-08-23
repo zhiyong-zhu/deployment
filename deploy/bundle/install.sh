@@ -93,6 +93,10 @@ install_engine_online() {
   apt-get update -qq
   apt-get install -y -qq ca-certificates curl
   install -m 0755 -d /etc/apt/keyrings
+  # 仓库路径按发行版区分（ubuntu/debian），codename 取自当前系统
+  . /etc/os-release
+  DISTRO_ID="${ID:-ubuntu}"
+  DISTRO_CODENAME="${VERSION_CODENAME:-}"
   # 国内网络下官方源常被重置：按 官方 → 阿里云 → 中科大 → 清华 顺序探测，用第一个可达源
   if [[ -n "$DOCKER_APT_MIRROR" ]]; then
     CANDIDATES=("$DOCKER_APT_MIRROR")
@@ -106,18 +110,18 @@ install_engine_online() {
   fi
   CHOSEN=""
   for base in "${CANDIDATES[@]}"; do
-    log "尝试 Docker apt 源: $base"
-    if curl -fsSL --connect-timeout 8 --retry 1 "${base}/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc; then
+    log "尝试 Docker apt 源: $base（$DISTRO_ID/$DISTRO_CODENAME）"
+    if curl -fsSL --connect-timeout 8 --retry 1 "${base}/linux/${DISTRO_ID}/gpg" -o /etc/apt/keyrings/docker.asc; then
       CHOSEN="$base"
       break
     fi
     log "该源不可达，尝试下一个..."
   done
   [[ -n "$CHOSEN" ]] || die "所有 Docker apt 源均不可达。请检查网络，或用 --docker-apt-mirror 指定可用的源基地址"
-  log "使用 Docker apt 源: $CHOSEN"
+  log "使用 Docker apt 源: $CHOSEN/linux/$DISTRO_ID"
   chmod a+r /etc/apt/keyrings/docker.asc
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $CHOSEN/linux/ubuntu \
-$(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $CHOSEN/linux/$DISTRO_ID \
+$DISTRO_CODENAME stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
     docker-buildx-plugin docker-compose-plugin
@@ -220,6 +224,9 @@ else
 fi
 
 log "同步项目文件到 $TARGET_DIR ..."
+mkdir -p "$TARGET_DIR"/cict "$TARGET_DIR"/nginx/conf.d "$TARGET_DIR"/mariadb \
+         "$TARGET_DIR"/data/{mariadb,redis,rabbitmq,rustfs} \
+         "$TARGET_DIR"/logs/{cict,nginx,rustfs}
 install -m 0644 "$SRC/docker-compose.yml" "$TARGET_DIR/"
 install -m 0644 "$SRC/.env.example" "$TARGET_DIR/"
 install -m 0644 "$SRC/cict/Dockerfile" "$TARGET_DIR/cict/"
@@ -236,9 +243,6 @@ if [[ "$ONLINE" -eq 1 && -n "${FRONTEND_TMP:-}" && "$FRONTEND_TMP" != "$FRONTEND
   rm -rf "$FRONTEND_TMP"
 fi
 install -m 0644 "$SRC/mariadb/server.cnf" "$TARGET_DIR/mariadb/"
-
-mkdir -p "$TARGET_DIR"/data/{mariadb,redis,rabbitmq,rustfs} \
-         "$TARGET_DIR"/logs/{cict,nginx,rustfs}
 
 # ===== 4. .env 密码管理 =====
 if [[ ! -f "$TARGET_DIR/.env" || "$FORCE_ENV" -eq 1 ]]; then
