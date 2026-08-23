@@ -1,10 +1,12 @@
 name: build
 
+# 注意：push.paths 过滤对 tag 推送同样生效，而 tag 指向的提交通常已在远端、
+# 推送事件无文件变更可匹配，会导致打 tag 后工作流被静默跳过、Release 无法触发。
+# 因此 push 触发不设 paths；PR 保留 paths 过滤避免无关改动产生冗余构建。
 on:
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['deploy/**', '.github/workflows/build.yml']
   pull_request:
     paths: ['deploy/**', '.github/workflows/build.yml']
   workflow_dispatch:
