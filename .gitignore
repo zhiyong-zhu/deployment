@@ -7,3 +7,4 @@ installer/*.spec
 installer/.venv/
 installer/.build-venv/
 installer/config.json
+deploy/bundle/dist/

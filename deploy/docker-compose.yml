@@ -1,0 +1,141 @@
+services:
+  # ============ MariaDB 11.4 ============
+  mariadb:
+    image: mariadb:11.4
+    container_name: cict-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+    volumes:
+      - ./mariadb/server.cnf:/etc/mysql/mariadb.conf.d/server.cnf:ro
+      - ./data/mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cict-net
+
+  # ============ Redis 7.4 ============
+  redis:
+    image: redis:7.4.10
+    container_name: cict-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    # 仅在 cict-net 内监听，不向宿主机发布 6379，并通过 requirepass 认证。
+    # 若后续增加 ports 映射，必须同时配置宿主机防火墙和访问白名单。
+    command: ["sh", "-c", "exec redis-server --bind 0.0.0.0 --protected-mode no --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cict-net
+
+  # ============ RabbitMQ 4.3 ============
+  rabbitmq:
+    image: rabbitmq:4.3.4-management
+    container_name: cict-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_ADMIN_PASSWORD: ${RABBITMQ_ADMIN_PASSWORD}
+    volumes:
+      - ./data/rabbitmq:/var/lib/rabbitmq
+    ports:
+      - "${ADMIN_BIND_ADDRESS}:${RABBITMQ_MGMT_PORT}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cict-net
+
+  # ============ RustFS ============
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.2
+    container_name: cict-rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+      RUSTFS_OBS_LOG_DIRECTORY: /var/log/rustfs/
+    volumes:
+      - ./data/rustfs:/data
+      - ./logs/rustfs:/var/log/rustfs
+    ports:
+      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_PORT}:9000"
+      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_CONSOLE_PORT}:9001"
+    networks:
+      - cict-net
+
+  # ============ CICT 后端 ============
+  cict:
+    build:
+      context: ./cict
+      dockerfile: Dockerfile
+    image: cict/backend:${CICT_IMAGE_TAG}
+    container_name: cict-app
+    restart: unless-stopped
+    environment:
+      # 左侧是容器内变量名，右侧来自同目录的 .env
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    volumes:
+      - ./logs/cict:/data/logs
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    networks:
+      - cict-net
+
+  # ============ Nginx ============
+  nginx:
+    image: nginx:1.28.3
+    container_name: cict-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+      - ./logs/nginx:/var/log/nginx
+    ports:
+      - "${NGINX_PORT}:80"
+    depends_on:
+      - cict
+    networks:
+      - cict-net
+
+networks:
+  cict-net:
+    driver: bridge
