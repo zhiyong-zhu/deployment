@@ -156,42 +156,72 @@ else
 fi
 docker compose version >/dev/null 2>&1 || die "缺少 docker compose 插件"
 
-# 镜像源连通性探测（仅在线模式）：Docker Hub 直连可用则不配置加速器，
-# 否则按序探测公共加速器并把第一个可用的写入 REGISTRY_MIRRORS。
+# 镜像源探测与测速（仅在线模式）：Docker Hub 直连与各公共加速器逐一探测并测速，
+# 打印对比后选用响应最快者写入 REGISTRY_MIRRORS；直连最快则不配置加速器。
 # Registry v2 协议端点 /v2/ 返回 200（匿名）或 401（要求认证）都视为存活。
 probe_registry_mirrors() {
   if ! command -v curl >/dev/null 2>&1; then
     apt-get install -y -qq curl >/dev/null 2>&1 || { log "警告: 无 curl 且安装失败，跳过镜像源探测"; return; }
   fi
-  probe_url() {
-    local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 "$1" || echo 000)"
-    [[ "$code" = "200" || "$code" = "401" ]]
+  # 输出 "HTTP状态码 响应总秒数"
+  probe_v2() {
+    curl -s -o /dev/null -w '%{http_code} %{time_total}' --connect-timeout 6 "$1/v2/" 2>/dev/null || echo "000 0"
+  }
+  # 对存活源测速两次取较快一次，输出毫秒整数；两次均失败输出空。
+  # 注意必须显式 return 0：本函数在赋值语句的命令替换中调用，源不可达时若以
+  # 非零退出，set -e 会误杀整个安装脚本
+  mirror_latency_ms() {
+    local out code t best=""
+    for _ in 1 2; do
+      out="$(probe_v2 "$1")"
+      code="${out%% *}" t="${out##* }"
+      [[ "$code" = "200" || "$code" = "401" ]] || continue
+      if [[ -z "$best" ]] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then best="$t"; fi
+    done
+    if [[ -n "$best" ]]; then awk -v t="$best" 'BEGIN{printf "%d", t*1000}'; fi
+    return 0
   }
   if [[ -n "$REGISTRY_MIRRORS" ]]; then
-    if probe_url "${REGISTRY_MIRRORS%%,*}/v2/"; then
+    local out code
+    out="$(probe_v2 "${REGISTRY_MIRRORS%%,*}")"
+    code="${out%% *}"
+    if [[ "$code" = "200" || "$code" = "401" ]]; then
       log "镜像加速器探测可达: $REGISTRY_MIRRORS"
     else
       log "警告: 指定的镜像加速器探测不可达，仍按指定值配置（内部源可能不支持匿名探测）"
     fi
     return
   fi
-  if probe_url "https://registry-1.docker.io/v2/"; then
-    log "镜像源检测: Docker Hub 直连可用，不配置加速器"
-    return
+  local m ms summary fastest
+  local -a rows=()
+  ms="$(mirror_latency_ms https://registry-1.docker.io)"
+  if [[ -n "$ms" ]]; then
+    rows+=("Docker Hub 直连|$ms|")
+  else
+    log "镜像源检测: Docker Hub 直连不可用"
   fi
-  log "镜像源检测: Docker Hub 直连不可用，开始探测公共加速器..."
-  local m
   for m in "https://docker.1ms.run" "https://docker.m.daocloud.io" \
            "https://docker.1panel.live" "https://hub.rat.dev"; do
-    if probe_url "$m/v2/"; then
-      REGISTRY_MIRRORS="$m"
-      log "镜像源检测: 使用加速器 $m"
-      return
+    ms="$(mirror_latency_ms "$m")"
+    if [[ -n "$ms" ]]; then
+      rows+=("$m|$ms|$m")
+    else
+      log "镜像源 $m 不可达，跳过"
     fi
-    log "镜像源 $m 不可达，尝试下一个..."
   done
-  log "警告: 所有镜像源均不可达，后续拉取镜像可能失败；可用 --registry-mirror 指定内部镜像源"
+  if [[ "${#rows[@]}" -eq 0 ]]; then
+    log "警告: 所有镜像源均不可达，后续拉取镜像可能失败；可用 --registry-mirror 指定内部镜像源"
+    return
+  fi
+  summary="$(printf '%s\n' "${rows[@]}" | LC_ALL=C sort -t'|' -k2 -n | awk -F'|' '{printf "%s(%sms), ", $1, $2}')"
+  fastest="$(printf '%s\n' "${rows[@]}" | LC_ALL=C sort -t'|' -k2 -n | head -1 | cut -d'|' -f3)"
+  log "镜像源测速对比: ${summary%, }"
+  if [[ -z "$fastest" ]]; then
+    log "镜像源检测: Docker Hub 直连最快，不配置加速器"
+  else
+    REGISTRY_MIRRORS="$fastest"
+    log "镜像源检测: 使用加速器 $fastest（响应最快）"
+  fi
 }
 
 if [[ "$ONLINE" -eq 1 ]]; then
@@ -348,14 +378,32 @@ chown -R "$RUSTFS_UID:$RUSTFS_UID" "$TARGET_DIR/data/rustfs" "$TARGET_DIR/logs/r
 
 # ===== 6. 启动服务 =====
 cd "$TARGET_DIR"
-log "校验 Compose 配置与 Nginx 语法..."
+log "校验 Compose 配置..."
 docker compose config --quiet
-docker compose run --rm --no-deps nginx nginx -t
 
 if [[ "$ONLINE" -eq 1 ]]; then
-  log "构建后端镜像 cict/backend:$BUNDLE_TAG（官方镜像由 compose 自动拉取）..."
-  docker compose build cict
+  # 本脚本输出经 tee 追加进安装报告（非终端），docker 的逐层进度事件会每个刷新追加
+  # 一行、刷爆日志：统一改为 --quiet 静默拉取、构建输出落盘，失败时回显末尾帮助排障。
+  # 拉取须先于下方 nginx -t：compose run 在镜像缺失时会隐式拉取，进度同样会刷屏
+  BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$TARGET_DIR/cict/Dockerfile" | head -1)"
+  if [[ -n "$BASE_IMAGE" ]]; then
+    log "拉取后端基础镜像 $BASE_IMAGE（静默，无逐行进度）..."
+    docker pull --quiet "$BASE_IMAGE"
+  fi
+  log "拉取官方镜像 mariadb/redis/rabbitmq/rustfs/nginx（静默）..."
+  docker compose pull --quiet mariadb redis rabbitmq rustfs nginx
+  BUILD_LOG="$(mktemp /tmp/cict-build.XXXXXX)"
+  log "构建后端镜像 cict/backend:$BUNDLE_TAG（进度写入 $BUILD_LOG）..."
+  if ! docker compose build cict >"$BUILD_LOG" 2>&1; then
+    tail -n 40 "$BUILD_LOG" || true
+    die "后端镜像构建失败，完整日志: $BUILD_LOG"
+  fi
+  log "后端镜像构建完成"
 fi
+
+# 离线模式镜像已在第 2 步 docker load 载入，在线模式刚拉取完成
+log "校验 Nginx 语法..."
+docker compose run --rm --no-deps nginx nginx -t
 
 log "启动全部服务..."
 docker compose up -d
