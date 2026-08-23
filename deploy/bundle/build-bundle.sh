@@ -88,6 +88,10 @@ install -m 0644 "$DEPLOY_DIR/cict/application.properties" "$BUNDLE_DIR/project/c
 install -m 0644 "$DEPLOY_DIR/nginx/nginx.conf" "$BUNDLE_DIR/project/nginx/"
 install -m 0644 "$DEPLOY_DIR/nginx/conf.d/cict.conf" "$BUNDLE_DIR/project/nginx/conf.d/"
 install -m 0644 "$DEPLOY_DIR/mariadb/server.cnf" "$BUNDLE_DIR/project/mariadb/"
+if [[ -d "$DEPLOY_DIR/db/init" ]]; then
+  mkdir -p "$BUNDLE_DIR/project/db/init"
+  cp -a "$DEPLOY_DIR/db/init/." "$BUNDLE_DIR/project/db/init/"
+fi
 install -m 0644 "$APP_JAR" "$BUNDLE_DIR/project/cict/app.jar"
 
 FRONTEND_TMP=""

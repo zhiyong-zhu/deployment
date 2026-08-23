@@ -17,6 +17,14 @@ cd deploy
 sudo ./bundle/install.sh --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号>
 ```
 
+也可先生成单文件便携安装器（部署现场只需 `cict-installer.run` + JAR + 前端 zip 三个文件）：
+
+```bash
+cd deploy/bundle && ./make-portable.sh
+sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <唯一版本号>   # 目标机
+sudo ./cict-installer.run --gui                                                          # 或 Web 向导
+```
+
 离线部署（联网机器制包，与目标机同架构同系统版本，已装 Docker、unzip、dpkg-dev）：
 
 ```bash

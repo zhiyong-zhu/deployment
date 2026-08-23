@@ -262,8 +262,8 @@ HTML = r"""<!DOCTYPE html>
  <div class="card"><h2>验证结果</h2>
   <button class="btn" onclick="doVerify()">立即验证</button>
   <table id="vtab" style="margin-top:14px"><thead><tr><th>检查项</th><th style="width:80px">状态</th><th>详情</th></tr></thead><tbody></tbody></table>
-  <div class="hint">全部通过后，请手工完成最后一步：SSH 隧道 <code>ssh -L 9001:127.0.0.1:9001 &lt;用户&gt;@&lt;服务器IP&gt;</code>，
-  访问 <code>http://127.0.0.1:9001</code> 用 .env 中的 RustFS 密钥登录并创建 <b>pike</b> 存储桶。</div></div>
+  <div class="hint">pike 存储桶由安装过程自动创建（失败时见部署指南 3.10 的手工方式）。控制台核对/管理：
+  SSH 隧道 <code>ssh -L 9001:127.0.0.1:9001 &lt;用户&gt;@&lt;服务器IP&gt;</code> 后访问 <code>http://127.0.0.1:9001</code>。</div></div>
 </section>
 </main><div id="toast"></div>
 <script>

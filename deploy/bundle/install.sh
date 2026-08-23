@@ -296,6 +296,11 @@ if [[ "$ONLINE" -eq 1 && -n "${FRONTEND_TMP:-}" && "$FRONTEND_TMP" != "$FRONTEND
   rm -rf "$FRONTEND_TMP"
 fi
 install -m 0644 "$SRC/mariadb/server.cnf" "$TARGET_DIR/mariadb/"
+# 数据库初始化脚本（可选）：放入 deploy/db/init/*.sql，首次初始化数据卷时由 MariaDB 镜像自动执行
+if [[ -d "$SRC/db/init" ]]; then
+  mkdir -p "$TARGET_DIR/db/init"
+  cp -a "$SRC/db/init/." "$TARGET_DIR/db/init/"
+fi
 
 # ===== 4. .env 密码管理 =====
 if [[ ! -f "$TARGET_DIR/.env" || "$FORCE_ENV" -eq 1 ]]; then
@@ -319,9 +324,18 @@ else
 fi
 
 # ===== 5. 目录属主 =====
+# 只授权项目文件。data/ 下数据目录的属主由容器自管理（MariaDB=mysql 用户、RabbitMQ=rabbitmq 用户），
+# 严禁递归 chown 整个部署目录：数据目录被改成部署用户后守护进程报 errno 13
+# （症状: show tables 报 Can't read dir of './cict/'，Liquibase 建表全部失败）
 RUN_USER="${SUDO_USER:-root}"
 RUN_GROUP="$(id -gn "$RUN_USER")"
-chown -R "$RUN_USER:$RUN_GROUP" "$TARGET_DIR"
+chown -R "$RUN_USER:$RUN_GROUP" \
+  "$TARGET_DIR"/cict "$TARGET_DIR"/nginx "$TARGET_DIR"/mariadb \
+  "$TARGET_DIR"/db "$TARGET_DIR"/logs/nginx 2>/dev/null || true
+for f in "$TARGET_DIR/.env" "$TARGET_DIR/.env.example" \
+         "$TARGET_DIR/docker-compose.yml" "$TARGET_DIR/install-report.txt"; do
+  [[ -e "$f" ]] && chown "$RUN_USER:$RUN_GROUP" "$f"
+done
 # Dockerfile 中后端用户固定为 UID/GID 10001
 chown -R 10001:10001 "$TARGET_DIR/logs/cict"
 # RustFS 官方镜像以非 root 用户运行（本版本为 UID 10001），数据与日志目录必须允许其写入，
@@ -389,6 +403,13 @@ if [[ "$READY" -ne 1 ]]; then
   die "部分服务未在 5 分钟内就绪，详见上方日志；完整日志: docker compose logs <服务>"
 fi
 
+# 空库检测：应用不会自动建表，空库将导致启动即崩溃（典型报错 Table 'cict.sys_dict_data' doesn't exist）
+TABLE_COUNT="$(docker compose exec -T mariadb sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()" cict' 2>/dev/null || echo -1)"
+if [[ "${TABLE_COUNT:-"-1"}" = "0" ]]; then
+  log "提示: cict 数据库当前为空。应用集成了 Liquibase，首次成功启动时会自动建表；"
+  log "      若启动仍报 Table ... doesn't exist，通常是 MariaDB 数据目录属主被破坏（errno 13，见第 5 步说明）或版本未带自动建表（此时按部署指南“数据库初始化”手工导入）"
+fi
+
 # ===== 7. 创建 RabbitMQ 管理账号（幂等） =====
 log "配置 RabbitMQ 管理账号..."
 admin_ok=0
@@ -405,7 +426,20 @@ for _ in $(seq 1 6); do
 done
 [[ "$admin_ok" -eq 1 ]] || log "警告: RabbitMQ 管理账号创建未完成，请按部署指南 3.9 手工执行"
 
-# ===== 8. 安装报告 =====
+# ===== 8. 创建 RustFS pike 存储桶（幂等，标准 S3 API + curl SigV4 签名） =====
+env_val() { grep -E "^$1=" "$TARGET_DIR/.env" | cut -d= -f2; }
+RUSTFS_BIND="$(env_val ADMIN_BIND_ADDRESS)"; RUSTFS_BIND="${RUSTFS_BIND:-127.0.0.1}"
+RUSTFS_PORT_V="$(env_val RUSTFS_PORT)"; RUSTFS_PORT_V="${RUSTFS_PORT_V:-9000}"
+BUCKET_CODE="$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 aws:amz:us-east-1:s3 \
+  --user "$(env_val RUSTFS_ACCESS_KEY):$(env_val RUSTFS_SECRET_KEY)" \
+  -X PUT "http://${RUSTFS_BIND}:${RUSTFS_PORT_V}/pike" || echo 000)"
+case "$BUCKET_CODE" in
+  200) log "已创建 RustFS 存储桶 pike" ;;
+  409) log "RustFS 存储桶 pike 已存在，跳过" ;;
+  *) log "警告: 创建 pike 桶返回 HTTP $BUCKET_CODE，请按部署指南 3.10 手工创建" ;;
+esac
+
+# ===== 9. 安装报告 =====
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 NGINX_PORT="$(grep -E '^NGINX_PORT=' "$TARGET_DIR/.env" | cut -d= -f2)"
 cat <<EOF
@@ -416,9 +450,8 @@ cat <<EOF
 后端镜像版本  : $BUNDLE_TAG
 
 后续步骤:
-  1. 创建 RustFS 存储桶 pike:
-     ssh -L 9001:127.0.0.1:9001 <用户>@${SERVER_IP:-<服务器IP>}
-     浏览器访问 http://127.0.0.1:9001，使用 .env 中的 RUSTFS_ACCESS_KEY/SECRET_KEY 登录后创建
+  1. RustFS 存储桶 pike 已在本安装中自动创建；如需控制台核对:
+     ssh -L 9001:127.0.0.1:9001 <用户>@${SERVER_IP:-<服务器IP>} 后访问 http://127.0.0.1:9001
   2. 管理端口默认只绑定 127.0.0.1，远程访问一律走 SSH 隧道（RabbitMQ 15672、RustFS 9000/9001）
   3. 查看服务状态: cd $TARGET_DIR 后执行 docker compose ps
      跟踪服务日志: docker compose logs -f <服务名>（服务名: mariadb/redis/rabbitmq/rustfs/cict/nginx）

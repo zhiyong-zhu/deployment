@@ -152,8 +152,21 @@ sudo ./bundle/install.sh --online \
 
 - 幂等：重复执行保留 `.env` 密码与 `data/` 数据，因此**日常升级 = 重跑本命令并换新 tag**（版本号必须唯一），详见附录 A.3
 - 已装 Docker 的机器加 `--skip-engine`
+
+**单文件便携安装器（可选）**：把全部部署文件与安装脚本内嵌成一个可执行文件，部署现场只需携带 `cict-installer.run` + 后端 JAR + 前端 zip 三个文件：
+
+```bash
+# 联网机器上生成一次（在仓库 deploy/bundle/ 目录）
+./make-portable.sh          # 产出 dist/cict-installer.run + .sha256
+
+# 目标机上（在线部署，参数与上文 install.sh 完全一致）
+sudo ./cict-installer.run --online --app-jar cict-app.jar --frontend dist.zip --tag 2.1.2
+sudo ./cict-installer.run --gui      # 或直接启动 Web 部署向导
+```
+
+原理是自解压脚本（文本头 + tar.gz 负载，按字节切分），无需任何运行时依赖；离线部署仍使用第 4 章的完整离线包（GB 级镜像不适合内嵌单文件）。
 - **国内网络**：Docker apt 源自动按 官方 → 阿里云 → 中科大 → 清华 顺序探测回退；镜像源先探测 Docker Hub 直连，不通则自动按 1ms → DaoCloud → 1Panel 顺序选用第一个可用加速器（探测结果会打印在日志中）。都不满足时用 `--registry-mirror <加速器地址>` 显式指定（可多次传入，显式值会覆盖已有配置）
-- 仅剩的手工步骤：3.10 创建 RustFS 存储桶 `pike`（脚本结束的报告中已给出操作提示）
+- 全流程无手工步骤：RustFS 存储桶 `pike` 由安装器自动创建（失败时按 3.10 手工方式处理）；安装报告会给出访问地址与后续管理命令
 
 **图形界面（可选）**：不习惯命令行的操作者可使用部署向导：
 
@@ -689,6 +702,8 @@ EOF
 
 | 设计点 | 说明 |
 |--------|------|
+| 后端 JAR 打入镜像 | JAR 是运行单元（程序）：镜像 tag 即版本，工件不可变、回滚原子化、锁定 JRE 运行时，且与 Liquibase 的 schema 迁移形成可审计的版本对应 |
+| 前端静态文件目录挂载 | 前端是被 Nginx 读取的"数据"而非运行单元：替换文件即生效、无需构建镜像；版本锚点为前端包归档（A.3.1），Nginx 镜像本身独立版本化 |
 | `restart: unless-stopped` | 容器退出或 Docker 重启后会自动拉起，除非管理员主动停止；语义比 systemd 的 `Restart=on-failure` 更宽 |
 | `depends_on` | 后端等待 MariaDB、Redis、RabbitMQ 健康检查通过；RustFS 镜像未假定内置 `curl`/`wget`，只等待容器启动，应用仍需具备连接重试能力 |
 | 不发布数据服务端口 | MariaDB 3306、Redis 6379 和 RabbitMQ 5672 只在 `cict-net` 中开放，宿主机运维通过 `docker compose exec` 进入容器 |
@@ -770,6 +785,19 @@ docker compose build cict
 docker compose up -d
 ```
 
+**数据库初始化（重要）**：后端集成了 Liquibase，应用**首次成功启动时自动建表并写入基础数据**，部署侧无需手工导 SQL。两个前提：
+
+1. MariaDB 数据目录（`data/mariadb`）属主必须是容器内 `mysql` 用户——手工运维时**不要对部署目录整体执行 `chown -R`**，否则 `show tables` 报 `errno 13 Can't read dir`，Liquibase 建表全部失败，应用侧表现为 `Table 'cict.xxx' doesn't exist` 的崩溃循环；修复方式见下方"目录属主"说明。
+2. 若某版本未带自动建表，把初始化 SQL 放入 `deploy/db/init/`（数据卷首次初始化时由 MariaDB 镜像自动执行），或手工导入：
+
+```bash
+cd /data/app/cict-docker
+docker compose exec -T mariadb sh -c 'exec mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" cict' < /path/to/init.sql
+docker compose restart cict
+```
+
+> **目录属主规则**：项目文件归部署用户；`data/mariadb`、`data/rabbitmq` 由容器内守护进程用户自管理，宿主机不要改动；`data/rustfs`、`logs/rustfs` 归 UID 10001（RustFS 镜像非 root 运行）；`logs/cict` 归 UID 10001（后端镜像用户）。install.sh 已按此规则收窄授权范围。
+
 ### 3.9 验证服务状态
 
 ```bash
@@ -803,11 +831,27 @@ docker compose exec -T rabbitmq sh -c '
 
 ### 3.10 在 RustFS 中创建存储桶
 
-后端配置引用了 `pike` 存储桶：
+后端配置引用了 `pike` 存储桶。**`install.sh` 已在安装末尾通过 S3 API 自动创建（幂等，已存在则跳过）**，手工部署或自动创建失败时用以下任一方式：
 
-1. 建立上述 SSH 隧道后访问 `http://127.0.0.1:9001`
-2. 使用 `.env` 中配置的 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 登录
-3. 创建名为 `pike` 的存储桶
+**方式一：curl（S3 API + SigV4 签名，零依赖）**
+
+```bash
+cd /data/app/cict-docker
+AK="$(grep '^RUSTFS_ACCESS_KEY=' .env | cut -d= -f2)"
+SK="$(grep '^RUSTFS_SECRET_KEY=' .env | cut -d= -f2)"
+curl --aws-sigv4 aws:amz:us-east-1:s3 --user "$AK:$SK" \
+  -X PUT http://127.0.0.1:9000/pike        # 200=创建成功，409=已存在
+```
+
+**方式二：Web 控制台**——建立 SSH 隧道后访问 `http://127.0.0.1:9001`，用 `.env` 中的 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 登录后创建。
+
+**方式三：mc（MinIO 客户端，RustFS 兼容）**
+
+```bash
+mc alias set cict http://127.0.0.1:9000 "$AK" "$SK" && mc mb -p cict/pike
+```
+
+RustFS 是 S3 兼容存储，aws cli、s3cmd、rclone 等任意 S3 客户端同样可以。
 
 ### 3.11 部署前后端代码（首次）
 
@@ -2287,7 +2331,11 @@ rm -rf "$FRONTEND_TMP" /tmp/dist.zip
 
 **验证**：浏览器访问 `http://<服务器IP>` 并强制刷新（Ctrl+F5）；或 `curl -sI http://127.0.0.1/ | head -1` 返回 `200`。
 
-**回滚**：前端没有镜像版本，回滚 = 用旧版 `dist.zip` 重跑本节命令（旧包要归档保留）。
+**回滚**：前端没有镜像版本，回滚 = 用旧版 `dist.zip` 重跑本节命令。发版时按版本归档前端包，作为回滚锚点（相当于后端的镜像 tag 台账）：
+
+```bash
+install -m 0644 /tmp/dist.zip /data/app/cict-docker/cict/frontend-releases/dist-2.1.3.zip
+```
 
 #### A.3.2 后端更新（在线环境）
 
@@ -2618,6 +2666,15 @@ docker volume prune -f        # 清理未使用的卷（谨慎！）
 ```
 
 > 离线环境慎用 `docker image prune -a`，它可能删除短期未运行但无法重新拉取的业务镜像。`docker volume prune` 可能永久删除 named volume 中的数据，执行前必须先核对 `docker volume ls` 并验证备份可恢复。
+
+**旧版本镜像清理纪律**：每次发版产生一个 `cict/backend:<tag>` 镜像，显示的 662MB 含共享基础层，实际增量约为 CONTENT SIZE（~229MB）。建议**保留最近 2~3 个 tag**（即回滚点），更早的显式删除：
+
+```bash
+docker images | grep cict/backend                 # 版本台账（这也是"当前跑的哪个版本"的权威清单）
+docker rmi cict/backend:1 cict/backend:2          # 删除确认不再需要的旧版本
+```
+
+> 若某测试环境发版极频繁、不在意 tag 回滚，可改用"通用 runner 镜像 + 挂载 `./cict/app.jar`"的模式换取免构建更新，但版本管理与回滚退化为文件级（同第 5 章直装模式），生产环境不推荐。
 
 ---
 

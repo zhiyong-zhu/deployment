@@ -11,6 +11,8 @@ services:
       MARIADB_PASSWORD: ${MARIADB_PASSWORD}
     volumes:
       - ./mariadb/server.cnf:/etc/mysql/mariadb.conf.d/server.cnf:ro
+      # 首次初始化数据卷时自动执行 db/init/ 下的 *.sql（建表与基础数据）；卷已初始化的存量环境需手工导入
+      - ./db/init:/docker-entrypoint-initdb.d:ro
       - ./data/mariadb:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]

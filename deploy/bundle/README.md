@@ -9,6 +9,18 @@
 
 两种模式共用的后续步骤：同步项目文件到部署目录 → 生成随机密码 `.env`（600 权限）→ `compose up -d` → 健康等待 → 创建 RabbitMQ 管理账号 → 输出验收报告。脚本幂等：保留 `.env` 与数据卷，重跑即升级。
 
+## 单文件便携安装器（在线部署）
+
+`make-portable.sh` 把 deploy/ 全部文件内嵌为一个自解压可执行 `dist/cict-installer.run`（~50KB），部署现场只需携带 **cict-installer.run + JAR + 前端 zip** 三个文件：
+
+```bash
+./make-portable.sh                                   # 联网机器生成
+sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip> --tag <版本>   # 目标机在线部署
+sudo ./cict-installer.run --gui                      # 或启动 Web 部署向导
+```
+
+参数与 `install.sh` 完全一致。离线部署不适用（GB 级镜像不内嵌），仍使用 `build-bundle.sh` 的完整离线包。
+
 ## 图形界面（可选）
 
 `deploy-gui.py`（单文件、仅 Python 3 标准库）提供 Web 向导：界面编辑参数/密码 → 一键调用 `install.sh` → 实时日志 → 逐项验证。在线模式在仓库 `deploy/gui/` 下启动，离线模式在 bundle 解压目录内启动（制包时自动打入）：
