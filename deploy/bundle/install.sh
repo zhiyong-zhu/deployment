@@ -13,6 +13,8 @@ FRONTEND=""
 TAG=""
 SKIP_ENGINE=0
 FORCE_ENV=0
+DOCKER_APT_MIRROR=""
+REGISTRY_MIRRORS=""
 
 log() { printf '[install] %s\n' "$*"; }
 die() { log "错误: $*" >&2; exit 1; }
@@ -30,6 +32,9 @@ usage() {
   --skip-engine     已安装 Docker 时跳过 Docker Engine 安装（离线模式跳过离线包安装，在线模式跳过官方源安装）
   --force-env       丢弃现有 .env 并重新生成随机密码（会与已有数据卷中的旧密码不一致，慎用）
   --online          在线模式，需同时提供 --app-jar / --frontend / --tag
+  --docker-apt-mirror BASE  指定 Docker apt 源基地址（如 https://mirrors.aliyun.com/docker-ce）。
+                           默认自动探测：官方 → 阿里云 → 中科大 → 清华，用第一个可达的源
+  --registry-mirror URL    Docker 镜像加速器，可多次传入（拉取镜像被拒/超时时使用）
   -h, --help        显示本帮助
 USAGE
 }
@@ -43,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --app-jar) APP_JAR="${2:-}"; shift 2 ;;
     --frontend) FRONTEND="${2:-}"; shift 2 ;;
     --tag) TAG="${2:-}"; shift 2 ;;
+    --docker-apt-mirror) DOCKER_APT_MIRROR="${2:-}"; shift 2 ;;
+    --registry-mirror) REGISTRY_MIRRORS="${REGISTRY_MIRRORS:+$REGISTRY_MIRRORS,}${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1（见 --help）" ;;
   esac
@@ -82,13 +89,34 @@ log "安装模式: $([[ "$ONLINE" -eq 1 ]] && echo 在线 || echo 离线)；安�
 
 # ===== 1. Docker Engine =====
 install_engine_online() {
-  log "从 Docker 官方 apt 源安装 Docker Engine..."
+  log "从 Docker apt 源安装 Docker Engine..."
   apt-get update -qq
   apt-get install -y -qq ca-certificates curl
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  # 国内网络下官方源常被重置：按 官方 → 阿里云 → 中科大 → 清华 顺序探测，用第一个可达源
+  if [[ -n "$DOCKER_APT_MIRROR" ]]; then
+    CANDIDATES=("$DOCKER_APT_MIRROR")
+  else
+    CANDIDATES=(
+      "https://download.docker.com"
+      "https://mirrors.aliyun.com/docker-ce"
+      "https://mirrors.ustc.edu.cn/docker-ce"
+      "https://mirrors.tuna.tsinghua.edu.cn/docker-ce"
+    )
+  fi
+  CHOSEN=""
+  for base in "${CANDIDATES[@]}"; do
+    log "尝试 Docker apt 源: $base"
+    if curl -fsSL --connect-timeout 8 --retry 1 "${base}/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc; then
+      CHOSEN="$base"
+      break
+    fi
+    log "该源不可达，尝试下一个..."
+  done
+  [[ -n "$CHOSEN" ]] || die "所有 Docker apt 源均不可达。请检查网络，或用 --docker-apt-mirror 指定可用的源基地址"
+  log "使用 Docker apt 源: $CHOSEN"
   chmod a+r /etc/apt/keyrings/docker.asc
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $CHOSEN/linux/ubuntu \
 $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
@@ -118,21 +146,38 @@ else
 fi
 docker compose version >/dev/null 2>&1 || die "缺少 docker compose 插件"
 
-# Docker 容器日志轮转（已存在配置则不覆盖）
-if [[ ! -f /etc/docker/daemon.json ]]; then
-  log "配置 Docker 日志轮转..."
-  cat > /etc/docker/daemon.json <<'EOF'
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "50m",
-    "max-file": "5"
-  }
-}
-EOF
+# Docker 守护进程配置：合并日志轮转与镜像加速器（保留已有键，不覆盖既有配置）
+DAEMON_UPDATED="$(python3 - "$REGISTRY_MIRRORS" <<'PYEOF'
+import json, os, sys
+path = "/etc/docker/daemon.json"
+cfg = {}
+if os.path.exists(path):
+    try:
+        cfg = json.load(open(path))
+    except Exception:
+        cfg = {}
+changed = False
+if "log-driver" not in cfg:
+    cfg["log-driver"] = "json-file"
+    cfg["log-opts"] = {"max-size": "50m", "max-file": "5"}
+    changed = True
+mirrors = [m.strip() for m in (sys.argv[1] or "").split(",") if m.strip()]
+if mirrors and not cfg.get("registry-mirrors"):
+    cfg["registry-mirrors"] = mirrors
+    changed = True
+if changed:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    print("updated")
+else:
+    print("noop")
+PYEOF
+)"
+if [[ "$DAEMON_UPDATED" = "updated" ]]; then
+  log "已更新 /etc/docker/daemon.json（日志轮转${REGISTRY_MIRRORS:+ + 镜像加速器}）"
   systemctl restart docker
 else
-  log "已存在 /etc/docker/daemon.json，跳过日志轮转配置"
+  log "/etc/docker/daemon.json 无需修改（已包含日志轮转与加速器配置）"
 fi
 
 # ===== 2. 离线模式：校验并加载镜像；在线模式：校验安装包 =====

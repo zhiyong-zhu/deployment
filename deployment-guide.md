@@ -152,6 +152,7 @@ sudo ./bundle/install.sh --online \
 
 - 幂等：重复执行保留 `.env` 密码与 `data/` 数据，因此**日常升级 = 重跑本命令并换新 tag**（版本号必须唯一），详见附录 A.3
 - 已装 Docker 的机器加 `--skip-engine`
+- **国内网络**：Docker apt 源自动按 官方 → 阿里云 → 中科大 → 清华 顺序探测回退（`download.docker.com` 被重置时无需手工干预）；拉取镜像超时/被拒时加 `--registry-mirror <加速器地址>`（可多次传入）
 - 仅剩的手工步骤：3.10 创建 RustFS 存储桶 `pike`（脚本结束的报告中已给出操作提示）
 
 **图形界面（可选）**：不习惯命令行的操作者可使用部署向导：
@@ -718,6 +719,8 @@ docker --version
 docker compose version
 docker run --rm hello-world
 ```
+
+> **国内网络**：`download.docker.com` 常被连接重置。`install.sh --online` 已内置探测回退（官方 → 阿里云 → 中科大 → 清华，用第一个可达源），手工安装可把上述命令中的地址换成镜像站，如 `https://mirrors.aliyun.com/docker-ce`（GPG 密钥路径同理：`<镜像站>/linux/ubuntu/gpg`），也可用 `--docker-apt-mirror` 直接指定。
 
 ### 3.6 配置 Docker 日志轮转
 

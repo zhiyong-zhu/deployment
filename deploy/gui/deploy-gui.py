@@ -247,7 +247,13 @@ HTML = r"""<!DOCTYPE html>
 </section>
 <section id="tab-run" style="display:none">
  <div class="card"><h2>执行安装</h2>
-  <label style="font-size:13px"><input type="checkbox" id="skip-engine"> 已安装 Docker，跳过 Engine 安装（--skip-engine）</label><br><br>
+  <label style="font-size:13px"><input type="checkbox" id="skip-engine"> 已安装 Docker，跳过 Engine 安装（--skip-engine）</label>
+  <div class="grid" style="margin-top:12px">
+   <div class="field"><label>Docker apt 源基地址（留空自动探测；国内网络下载失败时填，如 mirrors.aliyun.com/docker-ce）</label>
+    <input id="k:docker_apt_mirror" type="text" placeholder="https://mirrors.aliyun.com/docker-ce"></div>
+   <div class="field"><label>镜像加速器（拉取 Docker Hub 镜像超时/被拒时填，可留空）</label>
+    <input id="k:registry_mirror" type="text" placeholder="https://<你的镜像加速地址>"></div>
+  </div><br>
   <button class="btn green" id="runbtn" onclick="runInstall()">开始安装</button>
   <span class="hint" id="runstate" style="display:inline;margin-left:12px"></span></div>
  <div class="card"><h2>安装日志（实时）</h2><pre id="log">等待启动安装...</pre></div>
@@ -304,7 +310,8 @@ async function saveConfig(){
 async function runInstall(){
  const v=collect();
  const body={skip_engine:$('skip-engine').checked,target_dir:v.target_dir,
-   app_jar:v.app_jar||'',frontend:v.frontend||'',tag:v.tag||''};
+   app_jar:v.app_jar||'',frontend:v.frontend||'',tag:v.tag||'',
+   docker_apt_mirror:v.docker_apt_mirror||'',registry_mirror:v.registry_mirror||''};
  const r=await(await fetch('/api/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
  if(!r.ok)return toast('无法启动: '+r.error,false);
  toast('安装已启动');logFrom=0;$('log').textContent='';startPoll()}
@@ -435,6 +442,10 @@ class Handler(BaseHTTPRequestHandler):
             cmd += ["--online", "--app-jar", app_jar, "--frontend", frontend, "--tag", tag]
         if not INSTALL_SH.is_file():
             return {"ok": False, "error": f"找不到 {INSTALL_SH}"}
+        if payload.get("docker_apt_mirror"):
+            cmd += ["--docker-apt-mirror", payload["docker_apt_mirror"]]
+        if payload.get("registry_mirror"):
+            cmd += ["--registry-mirror", payload["registry_mirror"]]
         return {"ok": JOB.start(cmd), "cmd": " ".join(cmd)}
 
 
