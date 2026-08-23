@@ -42,10 +42,14 @@ jobs:
           docker compose --env-file /tmp/test.env config --quiet
       - name: 部署向导冒烟测试
         run: |
-          python3 deploy/gui/deploy-gui.py > /tmp/gui.log 2>&1 &
+          # -u 关闭 stdout 缓冲：重定向到文件时 print 需立即落盘，kill 前缓冲内容会丢失
+          python3 -u deploy/gui/deploy-gui.py > /tmp/gui.log 2>&1 &
           GUI_PID=$!
-          sleep 2
-          MODE="$(curl -sf http://127.0.0.1:8788/api/config | python3 -c 'import json,sys; print(json.load(sys.stdin)["mode"])')"
+          for _ in 1 2 3 4 5; do
+            curl -sf http://127.0.0.1:8788/api/config > /tmp/api.json && break
+            sleep 1
+          done
+          MODE="$(python3 -c 'import json; print(json.load(open("/tmp/api.json"))["mode"])')"
           test "$MODE" = "online"
           kill "$GUI_PID"
           grep -q "模式: online" /tmp/gui.log
