@@ -382,45 +382,72 @@ log "校验 Compose 配置..."
 docker compose config --quiet
 
 if [[ "$ONLINE" -eq 1 ]]; then
-  # 拉取进度处理：非终端下 docker 每个进度事件追加一行会刷爆安装报告，纯 --quiet 又让
-  # 慢速网络的长时间拉取毫无反馈。用过滤器聚合各层 Downloading 进度，每 10 秒最多输出
-  # 一行汇总；层完成/摘要/错误等低频状态行原样透传。拉取须先于下方 nginx -t：compose run
-  # 在镜像缺失时会隐式拉取，进度同样会刷屏。
-  PROGRESS_FILTER="$(mktemp /tmp/pull-progress.XXXXXX.py)"
-  cat >"$PROGRESS_FILTER" <<'PYEOF'
-import re, sys, time
-last, cur, tot = 0.0, {}, {}
-pat = re.compile(r'Downloading \[[^]]*\]\s*([0-9.]+)([kMG]?)B\s*/\s*([0-9.]+)([kMG]?)B')
-mult = {"": 1, "k": 1e3, "M": 1e6, "G": 1e9}
+  # 镜像拉取直接消费 Docker API 的 NDJSON 进度流。不能靠 docker pull 的输出做进度：
+  # 非 TTY 下它只打印层状态变化、不输出逐层百分比（管道过滤器无从聚合，纯静默时慢速
+  # 拉取全程无反馈）；且镜像源连接挂死时 docker 会无限等待。改为：每 10 秒聚合输出一行
+  # 真实进度；--speed-limit/--speed-time 在持续近零吞吐时中断本次拉取，配合最多 3 次
+  # 重试自动逃离卡死的连接（已完成的层在 daemon 内容库有缓存，重试只补缺失部分）。
+  PULL_PARSER="$(mktemp /tmp/pull-parser.XXXXXX.py)"
+  cat >"$PULL_PARSER" <<'PYEOF'
+import json, sys, time
+image = sys.argv[1]
+last, cur, tot, done = 0.0, {}, {}, False
 for line in sys.stdin:
-    line = line.rstrip("\n")
-    m = pat.search(line)
-    if m:
-        lid = line.split(":", 1)[0]
-        cur[lid] = float(m.group(1)) * mult[m.group(2)]
-        tot[lid] = float(m.group(3)) * mult[m.group(4)]
-        now = time.time()
-        if now - last >= 10:
-            last = now
-            c, t = sum(cur.values()), sum(tot.values())
-            pct = c / t * 100 if t else 0
-            print("[install] 拉取进度: %.1fMB / %.1fMB（%.0f%%）" % (c / 1e6, t / 1e6, pct), flush=True)
+    try:
+        ev = json.loads(line)
+    except Exception:
         continue
-    if "Extracting [" in line:  # 解包进度同样高频；层 Download complete 已可见
+    if "error" in ev:
+        print("[install] 拉取 %s 失败: %s" % (image, ev["error"]), flush=True)
+        sys.exit(1)
+    status, lid = ev.get("status", ""), ev.get("id", "")
+    if status == "Downloading":
+        d = ev.get("progressDetail") or {}
+        if "current" in d and "total" in d:
+            cur[lid], tot[lid] = d["current"], d["total"]
+            now = time.time()
+            if now - last >= 10:
+                last = now
+                c, t = sum(cur.values()), sum(tot.values())
+                print("[install] 拉取进度: %.1fMB / %.1fMB（%.0f%%）" % (c/1e6, t/1e6, (c/t*100 if t else 0)), flush=True)
         continue
-    print(line, flush=True)
+    if lid:
+        print("%s: %s" % (lid, status), flush=True)
+    elif status:
+        print(status, flush=True)
+    if status.startswith("Status"):
+        done = True
+print("[install] 拉取完成: %s" % image if done else "[install] 拉取 %s 的进度流提前结束" % image, flush=True)
+sys.exit(0 if done else 1)
 PYEOF
+  docker_pull_progress() {
+    local image="$1" name tag attempt
+    name="${image%:*}"; tag="${image##*:}"
+    [[ "$name" = "$image" ]] && tag="latest"
+    for attempt in 1 2 3; do
+      [[ "$attempt" -gt 1 ]] && log "重试拉取 $image（第 $attempt/3 次）..."
+      if curl -sN --max-time 3600 --speed-limit 64 --speed-time 180 \
+           --unix-socket /var/run/docker.sock \
+           -X POST "http://localhost/images/create?fromImage=${name}&tag=${tag}" \
+           | python3 "$PULL_PARSER" "$image"; then
+        return 0
+      fi
+      sleep 3
+    done
+    return 1
+  }
   BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$TARGET_DIR/cict/Dockerfile" | head -1)"
   if [[ -n "$BASE_IMAGE" ]]; then
     log "拉取后端基础镜像 $BASE_IMAGE ..."
-    if ! docker pull "$BASE_IMAGE" 2>&1 | python3 "$PROGRESS_FILTER"; then
-      die "拉取基础镜像 $BASE_IMAGE 失败，请检查网络后重跑安装器"
-    fi
+    docker_pull_progress "$BASE_IMAGE" \
+      || die "拉取基础镜像 $BASE_IMAGE 失败（已重试 3 次），可重跑安装器继续（已下载的层不会重复下载）"
   fi
-  log "拉取官方镜像 mariadb/redis/rabbitmq/rustfs/nginx ..."
-  if ! docker compose pull mariadb redis rabbitmq rustfs nginx 2>&1 | python3 "$PROGRESS_FILTER"; then
-    die "拉取官方镜像失败，请检查网络后重跑安装器"
-  fi
+  # 官方镜像逐个经同一通道拉取（排除本地构建的 cict/backend）
+  mapfile -t OFFICIAL_IMAGES < <(docker compose config --images | grep -v '^cict/backend' || true)
+  log "拉取官方镜像 ${OFFICIAL_IMAGES[*]-（无）} ..."
+  for img in "${OFFICIAL_IMAGES[@]}"; do
+    docker_pull_progress "$img" || die "拉取 $img 失败（已重试 3 次），可重跑安装器继续"
+  done
   # 构建输出整体落盘避免 buildkit 逐行进度刷屏，另起心跳每 15 秒报告一次最近进度
   BUILD_LOG="$(mktemp /tmp/cict-build.XXXXXX)"
   log "构建后端镜像 cict/backend:$BUNDLE_TAG ..."
