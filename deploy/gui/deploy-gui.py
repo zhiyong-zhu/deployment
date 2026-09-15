@@ -42,6 +42,24 @@ else:
     raise SystemExit("请在离线安装包目录或仓库 deploy/gui/ 下运行本程序")
 
 DEFAULT_TARGET = "/data/app/cict-docker"
+# install.sh 安装成功后会把部署路径记录到该文件（与命令行共用，升级/GUI 默认沿用上次路径）
+STATE_FILE = Path("/etc/cict-docker/deploy.env")
+
+def recorded_target():
+    """读取 install.sh 记录的上次部署路径；目录里仍有部署文件才返回，否则回退默认值。"""
+    try:
+        for line in STATE_FILE.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^TARGET_DIR=(.+)$", line.strip())
+            if m:
+                path = m.group(1).strip()
+                if path.startswith("/") and (Path(path) / "docker-compose.yml").is_file():
+                    return path
+                return None
+    except OSError:
+        pass
+    return None
+
+DEFAULT_TARGET = recorded_target() or DEFAULT_TARGET
 
 # 可编辑的配置文件（相对 SRC 路径 → 界面标签）
 EDITABLE_FILES = {
@@ -69,6 +87,8 @@ FIELD_LABELS = {
     "RUSTFS_SECRET_KEY": "RustFS SecretKey",
     "JAVA_TOOL_OPTIONS": "JVM 参数",
     "NGINX_PORT": "Nginx 对外端口",
+    "CICT_PORT": "后端 API 直连端口",
+    "MARIADB_PORT": "MariaDB 直连端口",
     "ADMIN_BIND_ADDRESS": "管理端口绑定地址",
     "RABBITMQ_MGMT_PORT": "RabbitMQ 管理端口",
     "RUSTFS_PORT": "RustFS S3 端口",
@@ -187,6 +207,10 @@ def run_verify(target_dir):
                         (env.get("RUSTFS_PORT", "9000"), "RustFS S3 端口"),
                         (env.get("RUSTFS_CONSOLE_PORT", "9001"), "RustFS 控制台端口")):
         results.append({"name": f"{label} (:{port} 仅本机)", "ok": port_open(int(port)), "detail": "监听 127.0.0.1" if port_open(int(port)) else "未监听"})
+    for port, label in ((env.get("CICT_PORT", "9090"), "后端 API 直连端口"),
+                        (env.get("MARIADB_PORT", "3306"), "MariaDB 直连端口")):
+        ok = port_open(int(port))
+        results.append({"name": f"{label} (:{port} 对外)", "ok": ok, "detail": "已监听" if ok else "未监听"})
     return results
 
 # ===== HTTP 服务 =====

@@ -7,6 +7,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="/data/app/cict-docker"
+# 上次部署记录（安装成功后写入，升级时不带 --target-dir 则自动沿用记录的路径）
+STATE_FILE="/etc/cict-docker/deploy.env"
+TARGET_DIR_EXPLICIT=0
 ONLINE=0
 APP_JAR=""
 FRONTEND=""
@@ -28,7 +31,8 @@ usage() {
   sudo ./install.sh --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号> [选项]
 
 选项:
-  --target-dir DIR   部署目录（默认 /data/app/cict-docker）
+  --target-dir DIR   部署目录（默认 /data/app/cict-docker；未显式指定时自动沿用
+                     /etc/cict-docker/deploy.env 记录的上次部署路径）
   --skip-engine     已安装 Docker 时跳过 Docker Engine 安装（离线模式跳过离线包安装，在线模式跳过官方源安装）
   --force-env       丢弃现有 .env 并重新生成随机密码（会与已有数据卷中的旧密码不一致，慎用）
   --online          在线模式，需同时提供 --app-jar / --frontend / --tag
@@ -42,7 +46,7 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --target-dir) TARGET_DIR="${2:-}"; shift 2 ;;
+    --target-dir) TARGET_DIR="${2:-}"; TARGET_DIR_EXPLICIT=1; shift 2 ;;
     --skip-engine) SKIP_ENGINE=1; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
     --online) ONLINE=1; shift ;;
@@ -82,6 +86,19 @@ fi
 
 AVAIL_GB="$(( $( { df -Pk /data 2>/dev/null || df -Pk /; } | awk 'NR==2{print $4}') / 1024 / 1024 ))"
 [[ "${AVAIL_GB:-0}" -ge 30 ]] || log "警告: /data 可用空间约 ${AVAIL_GB:-?}GB，低于建议值 30GB"
+
+# 复用上次部署路径：升级时忘带 --target-dir 会落到默认路径全新空部署（与旧数据分离），
+# 因此未显式指定时沿用 STATE_FILE 记录的 TARGET_DIR；仅当记录目录仍有部署文件时复用，
+# 目录已被清空则回退默认路径
+if [[ "$TARGET_DIR_EXPLICIT" -ne 1 && -f "$STATE_FILE" ]]; then
+  LAST_DIR="$(grep -E '^TARGET_DIR=' "$STATE_FILE" | head -1 | cut -d= -f2- || true)"
+  if [[ -n "$LAST_DIR" && ( -f "$LAST_DIR/docker-compose.yml" || -f "$LAST_DIR/.env" ) ]]; then
+    TARGET_DIR="$LAST_DIR"
+    log "沿用上次部署路径 ${TARGET_DIR}（记录于 ${STATE_FILE}），如需更换请显式传 --target-dir"
+  elif [[ -n "$LAST_DIR" ]]; then
+    log "记录中的路径 $LAST_DIR 已无部署文件，本次使用默认路径 $TARGET_DIR"
+  fi
+fi
 
 mkdir -p "$TARGET_DIR"
 REPORT="$TARGET_DIR/install-report.txt"
@@ -583,23 +600,40 @@ case "$BUCKET_CODE" in
   *) log "警告: 创建 pike 桶返回 HTTP $BUCKET_CODE，请按部署指南 3.10 手工创建" ;;
 esac
 
-# ===== 9. 安装报告 =====
+# ===== 9. 记录部署状态并输出安装报告 =====
+# 记录本次部署路径与版本：后续升级不带 --target-dir 时自动沿用（见第 0 步的复用逻辑）
+install -d -m 0755 "$(dirname "$STATE_FILE")"
+cat > "$STATE_FILE" <<STATEEOF
+# CICT Docker 部署记录（install.sh 自动维护；升级未显式传 --target-dir 时沿用 TARGET_DIR）
+TARGET_DIR=$TARGET_DIR
+LAST_MODE=$([[ "$ONLINE" -eq 1 ]] && echo online || echo offline)
+LAST_BUNDLE_TAG=$BUNDLE_TAG
+LAST_INSTALL_AT=$(date '+%Y-%m-%d %H:%M:%S %z')
+STATEEOF
+log "已记录部署路径到 ${STATE_FILE}（下次升级不带 --target-dir 时自动沿用）"
+
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-NGINX_PORT="$(grep -E '^NGINX_PORT=' "$TARGET_DIR/.env" | cut -d= -f2)"
+NGINX_PORT="$(env_val NGINX_PORT)"; NGINX_PORT="${NGINX_PORT:-80}"
+CICT_PORT_V="$(env_val CICT_PORT)"; CICT_PORT_V="${CICT_PORT_V:-9090}"
+MARIADB_PORT_V="$(env_val MARIADB_PORT)"; MARIADB_PORT_V="${MARIADB_PORT_V:-3306}"
 cat <<EOF
 
 ==================== CICT 安装完成 ====================
-访问地址      : http://${SERVER_IP:-<服务器IP>}:${NGINX_PORT:-80}
+访问地址      : http://${SERVER_IP:-<服务器IP>}:${NGINX_PORT}
+后端 API 直连 : http://${SERVER_IP:-<服务器IP>}:${CICT_PORT_V}（绕过 nginx，供外部系统直连）
+数据库直连    : ${SERVER_IP:-<服务器IP>}:${MARIADB_PORT_V}（账号与密码见 .env 的 MARIADB_USER/MARIADB_PASSWORD）
 密码文件      : $TARGET_DIR/.env （权限 600，含全部随机密码，请立即备份）
 后端镜像版本  : $BUNDLE_TAG
 
 后续步骤:
   1. RustFS 存储桶 pike 已在本安装中自动创建；如需控制台核对:
      ssh -L 9001:127.0.0.1:9001 <用户>@${SERVER_IP:-<服务器IP>} 后访问 http://127.0.0.1:9001
-  2. 管理端口默认只绑定 127.0.0.1，远程访问一律走 SSH 隧道（RabbitMQ 15672、RustFS 9000/9001）
+  2. 后端 ${CICT_PORT_V} 与 MariaDB ${MARIADB_PORT_V} 已绑定 0.0.0.0 对外直连，请在防火墙限制来源网段；
+     管理端口默认只绑定 127.0.0.1，远程访问一律走 SSH 隧道（RabbitMQ 15672、RustFS 9000/9001）
   3. 查看服务状态: cd $TARGET_DIR 后执行 docker compose ps
      跟踪服务日志: docker compose logs -f <服务名>（服务名: mariadb/redis/rabbitmq/rustfs/cict/nginx）
-  4. 后续升级: 在线环境重跑本命令并换新 tag；离线环境用新包重跑。详见部署指南附录 A.3
+  4. 后续升级: 在线环境重跑本命令并换新 tag；离线环境用新包重跑；不带 --target-dir 时自动沿用本次
+     部署路径（记录于 ${STATE_FILE}）。详见部署指南附录 A.3
 
 =======================================================
 EOF

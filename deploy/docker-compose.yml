@@ -14,6 +14,11 @@ services:
       # 首次初始化数据卷时自动执行 db/init/ 下的 *.sql（建表与基础数据）；卷已初始化的存量环境需手工导入
       - ./db/init:/docker-entrypoint-initdb.d:ro
       - ./data/mariadb:/var/lib/mysql
+    ports:
+      # 数据库直连：外部客户端用 .env 的 MARIADB_USER/MARIADB_PASSWORD 访问
+      # <宿主机IP>:${MARIADB_PORT}（镜像为该账号默认放行任意来源主机）；root 仅限容器内。
+      # 对外开放，生产环境务必在宿主机防火墙限制来源网段
+      - "${MARIADB_PORT}:3306"
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -113,6 +118,10 @@ services:
       CICT_PUBLIC_S3_ENDPOINT: ${CICT_PUBLIC_S3_ENDPOINT:-http://rustfs:9000}
     volumes:
       - ./logs/cict:/data/logs
+    ports:
+      # 后端 API 直连：外部系统可绕过 nginx 直连 http://<宿主机IP>:${CICT_PORT}
+      # （nginx 的 /api/ 反代仍是统一入口）；对外开放，生产环境建议防火墙限制来源
+      - "${CICT_PORT}:9090"
     depends_on:
       mariadb:
         condition: service_healthy

@@ -69,8 +69,8 @@ cd cict-offline-bundle
 sudo ./install.sh
 ```
 
-- 默认部署到 `/data/app/cict-docker`，可用 `--target-dir` 覆盖
-- 幂等：重复执行保留已有 `.env` 与 `data/` 数据，只同步项目文件并重新拉起服务，因此也用于**离线升级**（换新包重跑即可）
+- 默认部署到 `/data/app/cict-docker`，可用 `--target-dir` 覆盖；安装成功后部署路径、模式与镜像版本记录到 `/etc/cict-docker/deploy.env`，之后升级不带 `--target-dir` 时自动沿用上次路径
+- 幂等：重复执行保留已有 `.env` 与 `data/` 数据，只同步项目文件并重新拉起服务，因此也用于**离线升级**（换新包重跑即可）；`.env.example` 新增的变量（如直连端口 `CICT_PORT`/`MARIADB_PORT`）会自动补齐到已有 `.env`
 - 安装日志与验收输出写入 `<部署目录>/install-report.txt`（不含密码）
 
 ## 离线升级后端

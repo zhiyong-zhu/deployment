@@ -123,7 +123,7 @@ Docker 主机不限于虚拟机：**实体 Ubuntu 服务器、云主机与虚拟
 
 ### 2.4 防火墙与安全基线
 
-- 主机上线前手工配置防火墙：默认只放行 SSH 与 NGINX 对外端口（默认 80）；RabbitMQ 管理端口 15672、RustFS 9000/9001 保持绑定 `127.0.0.1`，远程访问一律走 SSH 隧道
+- 主机上线前手工配置防火墙：默认只放行 SSH、NGINX 对外端口（默认 80）、后端直连端口（默认 9090）与 MariaDB 直连端口（默认 3306）；9090/3306 面向所有网卡监听，建议仅对信任网段开放。RabbitMQ 管理端口 15672、RustFS 9000/9001 保持绑定 `127.0.0.1`，远程访问一律走 SSH 隧道
 - 生产环境按网络策略另行评估 HTTPS 证书（本文档以 80 端口作为首次部署验证基线）
 
 ---
@@ -151,6 +151,7 @@ sudo ./bundle/install.sh --online \
 脚本与第 4 章离线安装是**同一个 `install.sh`**：`--online` 模式自动从 Docker 官方 apt 源安装 Docker Engine（3.5）、配置日志轮转（3.6）、拉取官方镜像并构建后端镜像（3.8），其余步骤（生成随机密码 `.env`、`compose up`、健康等待、RabbitMQ 管理账号、验收报告）与离线安装完全一致。
 
 - 幂等：重复执行保留 `.env` 密码与 `data/` 数据，因此**日常升级 = 重跑本命令并换新 tag**（版本号必须唯一），详见附录 A.3
+- 部署路径记忆：安装成功后把部署目录、安装模式与镜像版本记录到 `/etc/cict-docker/deploy.env`；之后升级不带 `--target-dir` 时自动沿用上次部署路径（记录目录仍有部署文件才复用），避免换目录执行后落到全新空部署、与存量数据分离。Web 部署向导的"部署目录"默认值同样读取该记录
 - 已装 Docker 的机器加 `--skip-engine`
 
 **单文件便携安装器（可选）**：把全部部署文件与安装脚本内嵌成一个可执行文件，部署现场只需携带 `cict-installer.run` + 后端 JAR + 前端 zip 三个文件：
@@ -183,21 +184,22 @@ sudo python3 deploy/gui/deploy-gui.py     # 浏览器经 SSH 隧道访问 http:/
                     │           Docker Host (Ubuntu 24)        │
                     │                                         │
    用户 ──:80──────► │  nginx ◄── proxy_pass ──► cict (:9090)  │
-                    │    │                      │             │
-                    │    │ static files          │             │
-                    │    │                      │             │
-   :15672 ─────────►  rabbitmq ◄────────────────┘             │
+                    │    │                      ▲             │
+                    │    │ static files          │直连         │
+   外部系统 :9090 ──►│                        │             │
+   :15672 ─────────►  rabbitmq ◄───────────────┘             │
    :9000  ─────────►  rustfs                                   │
                     │    │                      │             │
-                    │  mariadb ◄────────────────┘             │
+   DB客户端 :3306 ──►│  mariadb ◄───────────────┘             │
                     │  redis   ◄────────────────┘             │
                     └─────────────────────────────────────────┘
 ```
 
 - **Nginx** 对外暴露 80 端口，前端静态文件由 Nginx 直接提供，`/api/` 路径反向代理到后端
-- **后端 CICT** 容器内部监听 9090 端口，仅在 Docker 内部网络中与 Nginx 通信
+- **后端 CICT** 容器内部监听 9090 端口，经 Nginx `/api/` 反代提供统一入口；同时把 9090 发布到宿主机（`CICT_PORT`，默认 9090，绑定 0.0.0.0），供外部系统绕过 Nginx 直连调用
 - **RabbitMQ 管理界面** 暴露 15672 端口，**RustFS S3 API** 暴露 9000 端口，**RustFS 控制台** 暴露 9001 端口
-- MariaDB、Redis 和 RabbitMQ 的业务端口不发布到宿主机，只在 `cict-net` 内部网络使用
+- **MariaDB** 把 3306 发布到宿主机（`MARIADB_PORT`，默认 3306，绑定 0.0.0.0），外部客户端用 `.env` 中的 `MARIADB_USER`/`MARIADB_PASSWORD` 直连（root 仅限容器内）
+- Redis 和 RabbitMQ 的业务端口不发布到宿主机，只在 `cict-net` 内部网络使用
 
 ### 3.2 项目目录结构
 
@@ -286,6 +288,8 @@ CICT_IMAGE_TAG=2.1.2-SNAPSHOT
 
 # ===== 对外端口 =====
 NGINX_PORT=80
+CICT_PORT=9090
+MARIADB_PORT=3306
 ADMIN_BIND_ADDRESS=127.0.0.1
 RABBITMQ_MGMT_PORT=15672
 RUSTFS_PORT=9000
@@ -296,7 +300,7 @@ chmod 600 .env
 unset MARIADB_ROOT_PASSWORD MARIADB_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD RABBITMQ_ADMIN_PASSWORD RUSTFS_ACCESS_KEY RUSTFS_SECRET_KEY
 ```
 
-> 上述命令会在本机生成随机密码，不会把公开示例密码带入部署。请将 `.env` 安全备份到密码管理系统；文件不得提交到 Git。管理端口默认只绑定 `127.0.0.1`，远程管理请使用 SSH 隧道或改为明确的管理网 IP，不要直接绑定公网地址。
+> 上述命令会在本机生成随机密码，不会把公开示例密码带入部署。请将 `.env` 安全备份到密码管理系统；文件不得提交到 Git。管理端口默认只绑定 `127.0.0.1`，远程管理请使用 SSH 隧道或改为明确的管理网 IP，不要直接绑定公网地址。后端直连端口（`CICT_PORT`）与数据库直连端口（`MARIADB_PORT`）绑定 `0.0.0.0` 对外开放，请在宿主机防火墙限制来源网段。
 
 实际密码最终保存在 `/data/app/cict-docker/.env`。执行完上述脚本后不需要再手工填写；如果公司已有指定密码，可执行 `nano /data/app/cict-docker/.env`，直接修改等号右侧的值，例如：
 
@@ -627,6 +631,11 @@ services:
     volumes:
       - ./mariadb/server.cnf:/etc/mysql/mariadb.conf.d/server.cnf:ro
       - ./data/mariadb:/var/lib/mysql
+    ports:
+      # 数据库直连：外部客户端用 .env 的 MARIADB_USER/MARIADB_PASSWORD 访问
+      # <宿主机IP>:${MARIADB_PORT}（镜像为该账号默认放行任意来源主机）；root 仅限容器内。
+      # 对外开放，生产环境务必在宿主机防火墙限制来源网段
+      - "${MARIADB_PORT}:3306"
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -726,6 +735,10 @@ services:
       CICT_PUBLIC_S3_ENDPOINT: ${CICT_PUBLIC_S3_ENDPOINT:-http://rustfs:9000}
     volumes:
       - ./logs/cict:/data/logs
+    ports:
+      # 后端 API 直连：外部系统可绕过 nginx 直连 http://<宿主机IP>:${CICT_PORT}
+      # （nginx 的 /api/ 反代仍是统一入口）；对外开放，生产环境建议防火墙限制来源
+      - "${CICT_PORT}:9090"
     depends_on:
       mariadb:
         condition: service_healthy
@@ -891,6 +904,10 @@ docker compose exec -T rabbitmq sh -c '
 # RustFS S3 API：http://127.0.0.1:9000
 # RustFS 控制台：http://127.0.0.1:9001
 # Nginx：浏览器访问 http://<服务器IP>
+
+# 直连端口（绑定 0.0.0.0，外部可直接访问，注意防火墙）：
+# 后端 API 直连：curl -i http://<服务器IP>:9090/auth/login   （端口来自 .env 的 CICT_PORT）
+# MariaDB 直连：mariadb -h <服务器IP> -P 3306 -u cict -p     （密码为 .env 的 MARIADB_PASSWORD，root 仅限容器内）
 ```
 
 ### 3.10 在 RustFS 中创建存储桶
@@ -2351,7 +2368,7 @@ sudo mv rustfs /usr/local/bin/
 
 ### A.3 Docker 部署更新手册（第 3-4 章）
 
-> 本手册是 Docker 主路线**唯一**的更新操作入口：3.11 的首次代码部署、4.5 的离线后端更新都指向这里。除特别说明外，所有命令在部署目录 `/data/app/cict-docker` 下执行。
+> 本手册是 Docker 主路线**唯一**的更新操作入口：3.11 的首次代码部署、4.5 的离线后端更新都指向这里。除特别说明外，所有命令在部署目录 `/data/app/cict-docker` 下执行；自定义过 `--target-dir` 的环境以实际路径为准，`cat /etc/cict-docker/deploy.env` 可查看上次安装记录的部署路径、模式与镜像版本（install.sh 升级时不带 `--target-dir` 会自动沿用该路径）。
 >
 > 三条原则：**每次发布使用唯一镜像 tag**（禁止复用旧 tag 或 latest）；**有状态服务更新前先备份**（方法见 A.7）；**回滚靠本地保留的旧 tag 镜像**，历史镜像就是回滚点。
 
