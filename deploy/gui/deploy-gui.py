@@ -21,8 +21,10 @@ import threading
 import time
 import urllib.request
 from collections import deque
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 PORT = 8788
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -182,6 +184,16 @@ CONTAINERS = [
     ("cict-rustfs", False), ("cict-app", False), ("cict-nginx", False),
 ]
 
+# ④ 服务状态页的服务清单：compose 服务名 → 容器名 → 界面标签（日志查询只接受这里的服务名）
+SERVICES = [
+    ("mariadb", "cict-mariadb", "MariaDB"),
+    ("redis", "cict-redis", "Redis"),
+    ("rabbitmq", "cict-rabbitmq", "RabbitMQ"),
+    ("rustfs", "cict-rustfs", "RustFS"),
+    ("cict", "cict-app", "CICT 后端"),
+    ("nginx", "cict-nginx", "Nginx"),
+]
+
 def run_verify(target_dir):
     results = []
     for name, need_health in CONTAINERS:
@@ -213,6 +225,117 @@ def run_verify(target_dir):
         results.append({"name": f"{label} (:{port} 对外)", "ok": ok, "detail": "已监听" if ok else "未监听"})
     return results
 
+# ===== ④ 服务状态页数据源 =====
+
+def run_docker(args, timeout=10):
+    """执行 docker 子命令；命令不存在/超时/其他异常返回 (None, 错误信息)。"""
+    try:
+        proc = subprocess.run(["docker", *args], capture_output=True, text=True,
+                              timeout=timeout, errors="replace")
+    except FileNotFoundError:
+        return None, "未安装 Docker"
+    except subprocess.SubprocessError as exc:
+        return None, str(exc)
+    return proc, ""
+
+
+def human_uptime(started_at):
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        seconds = int((datetime.now(timezone.utc) - started).total_seconds())
+    except ValueError:
+        return ""
+    days, rem = divmod(max(seconds, 0), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days} 天 {hours} 时"
+    if hours:
+        return f"{hours} 时 {minutes} 分"
+    return f"{minutes} 分"
+
+
+def get_services(target_dir):
+    """容器状态 + docker port 映射 + 按 .env 端口配置的本机监听检测。"""
+    env_path = Path(target_dir) / ".env"
+    env = parse_env(env_path.read_text()) if env_path.is_file() else {}
+    version_proc, docker_error = run_docker(["--version"])
+    docker_version = version_proc.stdout.strip() if version_proc and version_proc.returncode == 0 else ""
+    # CLI 存在 ≠ 守护进程在跑：daemon 未启动时跳过逐容器查询，避免全部误报"容器不存在"
+    daemon_ok = False
+    if docker_version:
+        proc, _ = run_docker(["version", "--format", "{{.Server.Version}}"])
+        daemon_ok = bool(proc and proc.returncode == 0)
+        if not daemon_ok:
+            stderr_tail = proc.stderr.strip().splitlines()[-1:] if proc and proc.stderr else []
+            docker_error = stderr_tail[0] if stderr_tail else "Docker 守护进程未运行"
+    services = []
+    for service, cname, label in SERVICES:
+        state = health = restarts = started_at = ""
+        ports = []
+        if daemon_ok:
+            proc, _ = run_docker(["inspect", "-f",
+                "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}|{{.State.StartedAt}}",
+                cname])
+            if proc and proc.returncode == 0 and proc.stdout.strip():
+                state, health, restarts, started_at = (proc.stdout.strip().split("|") + ["", "", "", ""])[:4]
+            proc, _ = run_docker(["port", cname])
+            if proc and proc.returncode == 0:
+                ports = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        # 同一容器端口同时绑定 0.0.0.0 与 [::] 时只显示 IPv4 行
+        ipv4 = [p for p in ports if "[::]" not in p]
+        services.append({
+            "service": service, "label": label, "container": cname,
+            "state": state, "health": health, "restarts": restarts,
+            "uptime": human_uptime(started_at) if state == "running" else "",
+            "ports": ipv4 or ports,
+        })
+    admin_bind = env.get("ADMIN_BIND_ADDRESS", "127.0.0.1")
+    port_checks = []
+    for name, key, default, bind in (
+            ("Nginx 对外端口", "NGINX_PORT", "80", "0.0.0.0"),
+            ("后端 API 直连端口", "CICT_PORT", "9090", "0.0.0.0"),
+            ("MariaDB 直连端口", "MARIADB_PORT", "3306", "0.0.0.0"),
+            ("RabbitMQ 管理端口", "RABBITMQ_MGMT_PORT", "15672", admin_bind),
+            ("RustFS S3 端口", "RUSTFS_PORT", "9000", admin_bind),
+            ("RustFS 控制台端口", "RUSTFS_CONSOLE_PORT", "9001", admin_bind)):
+        try:
+            port = int(env.get(key, default) or default)
+        except ValueError:
+            continue
+        port_checks.append({"name": name, "port": port, "bind": bind, "ok": port_open(port)})
+    return {
+        "ok": True,
+        "docker": docker_version,
+        "docker_error": docker_error,
+        "target_dir": target_dir,
+        "services": services,
+        "port_checks": port_checks,
+    }
+
+
+def get_logs(service, lines):
+    containers = {svc: cname for svc, cname, _ in SERVICES}
+    cname = containers.get(service)
+    if not cname:
+        return {"ok": False, "error": f"未知服务: {service}"}
+    lines = max(20, min(lines, 2000))
+    try:
+        # stderr 合并进 stdout：nginx 等服务的日志分写两个流，合并后按产生顺序交错便于阅读
+        proc = subprocess.run(["docker", "logs", "--tail", str(lines), cname],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=60, errors="replace")
+    except FileNotFoundError:
+        return {"ok": False, "error": "未安装 Docker"}
+    except subprocess.SubprocessError as exc:
+        return {"ok": False, "error": f"读取日志超时: {exc}"}
+    output = proc.stdout or ""
+    if proc.returncode != 0:
+        detail = output.strip().splitlines()
+        return {"ok": False, "error": detail[-1] if detail else f"docker logs 退出码 {proc.returncode}"}
+    # 截断到 400KB，避免超长日志拖垮浏览器渲染
+    return {"ok": True, "service": service, "container": cname, "log": output[-400000:]}
+
 # ===== HTTP 服务 =====
 HTML = r"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -238,7 +361,8 @@ HTML = r"""<!DOCTYPE html>
  .btn{padding:9px 20px;border:none;border-radius:6px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
  .btn:disabled{background:#9ca3af;cursor:not-allowed}
  .btn.green{background:#059669}
- pre#log{background:#0b1021;color:#d1fae5;font-size:12px;line-height:1.55;padding:14px;border-radius:8px;
+ select{padding:7px 9px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;background:#fff;color:#1f2937;font-family:inherit}
+ pre#log,pre#svclog{background:#0b1021;color:#d1fae5;font-size:12px;line-height:1.55;padding:14px;border-radius:8px;
    height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
  table{width:100%;border-collapse:collapse;font-size:13px}
  td,th{padding:8px 10px;border-bottom:1px solid #e5e7eb;text-align:left}
@@ -254,7 +378,8 @@ HTML = r"""<!DOCTYPE html>
  <span class="badge" id="mode"></span><span class="badge" id="root"></span>
  <span class="badge" id="tag" style="margin-left:auto"></span></header>
 <nav><button class="active" data-tab="cfg">① 配置</button>
- <button data-tab="run">② 一键安装</button><button data-tab="verify">③ 验证</button></nav>
+ <button data-tab="run">② 一键安装</button><button data-tab="verify">③ 验证</button>
+ <button data-tab="status">④ 服务状态</button></nav>
 <main>
 <section id="tab-cfg">
  <div class="card"><h2>部署参数</h2><div class="grid" id="params"></div>
@@ -289,6 +414,29 @@ HTML = r"""<!DOCTYPE html>
   <div class="hint">pike 存储桶由安装过程自动创建（失败时见部署指南 3.10 的手工方式）。控制台核对/管理：
   SSH 隧道 <code>ssh -L 9001:127.0.0.1:9001 &lt;用户&gt;@&lt;服务器IP&gt;</code> 后访问 <code>http://127.0.0.1:9001</code>。</div></div>
 </section>
+<section id="tab-status" style="display:none">
+ <div class="card"><h2>服务状态 <span class="hint" id="docker-info" style="margin-left:12px"></span></h2>
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+   <button class="btn" onclick="loadServices()">立即刷新</button>
+   <label style="font-size:13px"><input type="checkbox" id="auto-refresh" onchange="toggleAuto()"> 每 5 秒自动刷新</label>
+  </div>
+  <table id="stab" style="margin-top:14px"><thead><tr><th>服务</th><th>容器</th><th style="width:100px">状态</th>
+   <th>健康</th><th>重启</th><th>已运行</th><th>端口映射</th></tr></thead><tbody></tbody></table>
+  <table id="ptab" style="margin-top:10px"><thead><tr><th>端口检测</th><th>地址</th><th style="width:90px">状态</th></tr></thead><tbody></tbody></table>
+  <div class="hint">端口映射来自 <code>docker port</code>；“端口检测”按 &lt;部署目录&gt;/.env 的端口配置在本机探测。
+  显示“容器不存在”表示尚未安装或容器未创建。自动刷新只刷新状态表，不拉取日志。</div>
+ </div>
+ <div class="card"><h2>容器日志</h2>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+   <select id="log-svc"></select>
+   <select id="log-lines"><option>100</option><option selected>300</option><option>1000</option><option>2000</option></select>
+   <button class="btn" onclick="loadLogs()">加载日志</button>
+   <span class="hint" id="log-meta"></span>
+  </div>
+  <pre id="svclog" style="margin-top:12px">选择服务后点击“加载日志”。</pre>
+  <div class="hint">日志来自 <code>docker logs --tail</code>（最多 2000 行，超长自动截断），只读不影响运行中的服务。</div>
+ </div>
+</section>
 </main><div id="toast"></div>
 <script>
 let CFG=null, logFrom=0, timer=null;
@@ -298,7 +446,8 @@ function rnd(n){const a=new Uint8Array(n);crypto.getRandomValues(a);return[...a]
 function toast(m,ok=true){const t=$('toast');t.textContent=m;t.style.background=ok?'#059669':'#dc2626';t.style.display='block';setTimeout(()=>t.style.display='none',2600)}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
- ['cfg','run','verify'].forEach(t=>$('tab-'+t).style.display=t===b.dataset.tab?'':'none');});
+ ['cfg','run','verify','status'].forEach(t=>$('tab-'+t).style.display=t===b.dataset.tab?'':'none');
+ if(b.dataset.tab==='status')loadServices();});
 async function load(){
  CFG=await (await fetch('/api/config')).json();
  $('mode').textContent=CFG.mode==='online'?'在线模式':'离线模式';
@@ -314,6 +463,8 @@ async function load(){
   o.innerHTML=field('app_jar','后端 JAR 路径（服务器上的路径）',CFG.app_jar||'',false)
    +field('frontend','前端产物路径（zip 或目录）',CFG.frontend||'',false)
    +field('tag','本次发布的唯一版本号',CFG.tag||'',false);}
+ $('log-svc').innerHTML=[['mariadb','MariaDB'],['redis','Redis'],['rabbitmq','RabbitMQ'],
+  ['rustfs','RustFS'],['cict','CICT 后端'],['nginx','Nginx']].map(([v,l])=>`<option value="${v}">${l}</option>`).join('');
  const adv=$('adv');adv.innerHTML='';
  for(const f of CFG.files){adv.insertAdjacentHTML('beforeend',
   `<p style="font-size:12px;color:#6b7280;margin:14px 0 4px">${f.label}</p><textarea id="f:${f.path}">${f.content.replace(/</g,'&lt;')}</textarea>`);}
@@ -351,6 +502,36 @@ async function doVerify(){
  for(const c of r.results)tb.insertAdjacentHTML('beforeend',
   `<tr><td>${c.name}</td><td class="st ${c.ok?'ok':'bad'}">${c.ok?'✓ 通过':'✗ 失败'}</td><td>${c.detail}</td></tr>`)}
 load();startPoll();
+const MONO='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px';
+let svcTimer=null;
+async function loadServices(){
+ const r=await(await fetch('/api/services')).json();
+ $('docker-info').textContent=r.docker?(r.docker_error?r.docker+' — '+r.docker_error:r.docker)
+  :('Docker 不可用: '+(r.docker_error||'未知错误'));
+ const missing=r.docker&&r.docker_error?'无法查询':'容器不存在';
+ const tb=$('stab').querySelector('tbody');tb.innerHTML='';
+ for(const s of r.services){
+  const run=s.state==='running';
+  tb.insertAdjacentHTML('beforeend',
+   `<tr><td>${s.label}</td><td style="${MONO}">${s.container}</td>
+    <td class="st ${run?'ok':'bad'}">${run?'运行中':(s.state||missing)}</td>
+    <td>${s.health||'-'}</td><td>${s.restarts||'-'}</td><td>${s.uptime||'-'}</td>
+    <td style="${MONO}">${s.ports.length?s.ports.join('<br>'):'-'}</td></tr>`)}
+ const pt=$('ptab').querySelector('tbody');pt.innerHTML='';
+ for(const p of r.port_checks)pt.insertAdjacentHTML('beforeend',
+  `<tr><td>${p.name}</td><td style="${MONO}">${p.bind}:${p.port}</td>
+   <td class="st ${p.ok?'ok':'bad'}">${p.ok?'监听中':'未监听'}</td></tr>`)}
+function toggleAuto(){
+ if($('auto-refresh').checked){loadServices();svcTimer=setInterval(loadServices,5000)}
+ else if(svcTimer){clearInterval(svcTimer);svcTimer=null}}
+async function loadLogs(){
+ const svc=$('log-svc').value||'mariadb',lines=$('log-lines').value;
+ $('log-meta').textContent='加载中...';$('svclog').textContent='';
+ const r=await(await fetch('/api/logs?service='+encodeURIComponent(svc)+'&lines='+lines)).json();
+ if(!r.ok){$('svclog').textContent='加载失败: '+r.error;$('log-meta').textContent='';return}
+ $('svclog').textContent=r.log||'（暂无日志输出）';
+ $('log-meta').textContent=r.container+' 最近 '+lines+' 行';
+ $('svclog').scrollTop=$('svclog').scrollHeight}
 </script></body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
@@ -361,6 +542,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -380,6 +562,17 @@ class Handler(BaseHTTPRequestHandler):
             with JOB.lock:
                 lines = list(JOB.lines)[since:]
                 self._json({"running": JOB.running, "exit_code": JOB.exit_code, "lines": lines})
+        elif self.path.startswith("/api/services"):
+            query = parse_qs(urlparse(self.path).query)
+            target = (query.get("target_dir") or [DEFAULT_TARGET])[0]
+            self._json(get_services(target))
+        elif self.path.startswith("/api/logs"):
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                lines = int((query.get("lines") or ["300"])[0])
+            except ValueError:
+                lines = 300
+            self._json(get_logs((query.get("service") or [""])[0], lines))
         else:
             self._json({"error": "not found"}, 404)
 
