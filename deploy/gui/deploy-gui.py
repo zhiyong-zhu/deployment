@@ -93,6 +93,7 @@ FIELD_LABELS = {
     "MARIADB_PORT": "MariaDB 直连端口",
     "ADMIN_BIND_ADDRESS": "管理端口绑定地址",
     "RABBITMQ_MGMT_PORT": "RabbitMQ 管理端口",
+    "RUSTFS_BIND_ADDRESS": "RustFS 端口绑定地址",
     "RUSTFS_PORT": "RustFS S3 端口",
     "RUSTFS_CONSOLE_PORT": "RustFS 控制台端口",
     "CICT_IMAGE_TAG": "后端镜像版本",
@@ -291,14 +292,15 @@ def get_services(target_dir):
             "ports": ipv4 or ports,
         })
     admin_bind = env.get("ADMIN_BIND_ADDRESS", "127.0.0.1")
+    rustfs_bind = env.get("RUSTFS_BIND_ADDRESS", "0.0.0.0")
     port_checks = []
     for name, key, default, bind in (
             ("Nginx 对外端口", "NGINX_PORT", "80", "0.0.0.0"),
             ("后端 API 直连端口", "CICT_PORT", "9090", "0.0.0.0"),
             ("MariaDB 直连端口", "MARIADB_PORT", "3306", "0.0.0.0"),
             ("RabbitMQ 管理端口", "RABBITMQ_MGMT_PORT", "15672", admin_bind),
-            ("RustFS S3 端口", "RUSTFS_PORT", "9000", admin_bind),
-            ("RustFS 控制台端口", "RUSTFS_CONSOLE_PORT", "9001", admin_bind)):
+            ("RustFS S3 端口", "RUSTFS_PORT", "9000", rustfs_bind),
+            ("RustFS 控制台端口", "RUSTFS_CONSOLE_PORT", "9001", rustfs_bind)):
         try:
             port = int(env.get(key, default) or default)
         except ValueError:

@@ -91,8 +91,10 @@ services:
       - ./data/rustfs:/data
       - ./logs/rustfs:/var/log/rustfs
     ports:
-      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_PORT}:9000"
-      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_CONSOLE_PORT}:9001"
+      # S3 API 与控制台对外发布（默认 0.0.0.0）：浏览器直传预签 URL / 外部 S3 工具直连，
+      # 仅凭 AK/SK 认证，无匿名访问；生产环境请在宿主机防火墙限制来源网段
+      - "${RUSTFS_BIND_ADDRESS:-0.0.0.0}:${RUSTFS_PORT}:9000"
+      - "${RUSTFS_BIND_ADDRESS:-0.0.0.0}:${RUSTFS_CONSOLE_PORT}:9001"
     networks:
       - cict-net
 

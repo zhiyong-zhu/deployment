@@ -627,9 +627,10 @@ cat <<EOF
 
 后续步骤:
   1. RustFS 存储桶 pike 已在本安装中自动创建；如需控制台核对:
-     ssh -L 9001:127.0.0.1:9001 <用户>@${SERVER_IP:-<服务器IP>} 后访问 http://127.0.0.1:9001
-  2. 后端 ${CICT_PORT_V} 与 MariaDB ${MARIADB_PORT_V} 已绑定 0.0.0.0 对外直连，请在防火墙限制来源网段；
-     管理端口默认只绑定 127.0.0.1，远程访问一律走 SSH 隧道（RabbitMQ 15672、RustFS 9000/9001）
+     直接访问 http://${SERVER_IP:-<服务器IP>}:9001（使用 .env 中 RUSTFS_ACCESS_KEY/SECRET_KEY 登录）
+  2. 后端 ${CICT_PORT_V}、MariaDB ${MARIADB_PORT_V} 与 RustFS 9000/9001 已绑定 0.0.0.0 对外直连
+     （RustFS 仅凭 AK/SK 认证，无匿名访问），请在防火墙限制来源网段；
+     RabbitMQ 管理端口 15672 仍只绑定 127.0.0.1，远程访问走 SSH 隧道
   3. 查看服务状态: cd $TARGET_DIR 后执行 docker compose ps
      跟踪服务日志: docker compose logs -f <服务名>（服务名: mariadb/redis/rabbitmq/rustfs/cict/nginx）
   4. 后续升级: 在线环境重跑本命令并换新 tag；离线环境用新包重跑；不带 --target-dir 时自动沿用本次

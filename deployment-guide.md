@@ -123,7 +123,7 @@ Docker 主机不限于虚拟机：**实体 Ubuntu 服务器、云主机与虚拟
 
 ### 2.4 防火墙与安全基线
 
-- 主机上线前手工配置防火墙：默认只放行 SSH、NGINX 对外端口（默认 80）、后端直连端口（默认 9090）与 MariaDB 直连端口（默认 3306）；9090/3306 面向所有网卡监听，建议仅对信任网段开放。RabbitMQ 管理端口 15672、RustFS 9000/9001 保持绑定 `127.0.0.1`，远程访问一律走 SSH 隧道
+- 主机上线前手工配置防火墙：默认只放行 SSH、NGINX 对外端口（默认 80）、后端直连端口（默认 9090）、MariaDB 直连端口（默认 3306）与 RustFS 9000/9001；9090/3306/9000/9001 面向所有网卡监听，建议仅对信任网段开放（RustFS 仅凭 AK/SK 认证，无匿名访问）。RabbitMQ 管理端口 15672 保持绑定 `127.0.0.1`，远程访问一律走 SSH 隧道
 - 生产环境按网络策略另行评估 HTTPS 证书（本文档以 80 端口作为首次部署验证基线）
 
 ---
@@ -290,8 +290,12 @@ CICT_IMAGE_TAG=2.1.2-SNAPSHOT
 NGINX_PORT=80
 CICT_PORT=9090
 MARIADB_PORT=3306
+# RabbitMQ 管理端口绑定地址（默认仅本机，远程访问走 SSH 隧道）
 ADMIN_BIND_ADDRESS=127.0.0.1
 RABBITMQ_MGMT_PORT=15672
+# RustFS S3/控制台端口对外发布（默认 0.0.0.0，供预签 URL 与外部 S3 工具直连；
+# 仅凭 AK/SK 认证，生产环境请在防火墙限制来源网段；如需收回仅本机访问，改为 127.0.0.1）
+RUSTFS_BIND_ADDRESS=0.0.0.0
 RUSTFS_PORT=9000
 RUSTFS_CONSOLE_PORT=9001
 EOF
@@ -708,8 +712,10 @@ services:
       - ./data/rustfs:/data
       - ./logs/rustfs:/var/log/rustfs
     ports:
-      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_PORT}:9000"
-      - "${ADMIN_BIND_ADDRESS}:${RUSTFS_CONSOLE_PORT}:9001"
+      # S3 API 与控制台对外发布（默认 0.0.0.0）：浏览器直传预签 URL / 外部 S3 工具直连，
+      # 仅凭 AK/SK 认证，无匿名访问；生产环境请在宿主机防火墙限制来源网段
+      - "${RUSTFS_BIND_ADDRESS:-0.0.0.0}:${RUSTFS_PORT}:9000"
+      - "${RUSTFS_BIND_ADDRESS:-0.0.0.0}:${RUSTFS_CONSOLE_PORT}:9001"
     networks:
       - cict-net
 
@@ -899,15 +905,15 @@ docker compose exec -T rabbitmq sh -c '
 '
 
 # 管理端口默认只绑定 127.0.0.1，可先建立 SSH 隧道：
-# ssh -L 15672:127.0.0.1:15672 -L 9000:127.0.0.1:9000 -L 9001:127.0.0.1:9001 <用户>@<服务器IP>
+# ssh -L 15672:127.0.0.1:15672 <用户>@<服务器IP>
 # RabbitMQ 管理界面：http://127.0.0.1:15672（使用 cict_admin）
-# RustFS S3 API：http://127.0.0.1:9000
-# RustFS 控制台：http://127.0.0.1:9001
 # Nginx：浏览器访问 http://<服务器IP>
 
 # 直连端口（绑定 0.0.0.0，外部可直接访问，注意防火墙）：
 # 后端 API 直连：curl -i http://<服务器IP>:9090/auth/login   （端口来自 .env 的 CICT_PORT）
 # MariaDB 直连：mariadb -h <服务器IP> -P 3306 -u cict -p     （密码为 .env 的 MARIADB_PASSWORD，root 仅限容器内）
+# RustFS S3 API：http://<服务器IP>:9000                      （预签 URL / 外部 S3 工具直连，AK/SK 见 .env）
+# RustFS 控制台：http://<服务器IP>:9001                      （登录使用 .env 的 RUSTFS_ACCESS_KEY/SECRET_KEY）
 ```
 
 ### 3.10 在 RustFS 中创建存储桶
