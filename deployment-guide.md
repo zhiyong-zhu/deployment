@@ -947,6 +947,40 @@ RustFS 是 S3 兼容存储，aws cli、s3cmd、rclone 等任意 S3 客户端同�
 > - 首次部署前端：按 **A.3.1** 执行一次（前端是挂载目录，无需构建镜像）
 > - 首次部署后端：在线环境按 **A.3.2** 执行一次；离线环境按 **A.3.3** 或 **4.0** 一键安装包执行
 
+### 3.12 运维控制台（cict-ops，日常运维的首选入口）
+
+install.sh 在安装末尾自动把部署向导安装为 **systemd 常驻服务 `cict-ops`**（文件位于 `/data/app/cict-ops`），此后日常运维不再需要 SSH + docker 命令：
+
+```bash
+systemctl status cict-ops                      # 服务状态
+# 远程访问先建隧道，再开浏览器：
+ssh -L 8788:127.0.0.1:8788 <用户>@<服务器IP>
+# 浏览器打开安装完成时输出的 http://127.0.0.1:8788/?token=<令牌>
+```
+
+访问令牌保存在 `/data/app/cict-ops/gui/console.env`（`SERVER_TOKEN=`，安装时随机生成，重装/升级保留）。忘记令牌时直接查看该文件。
+
+五个页签对应日常操作：
+
+| 操作 | 位置 | 底层动作 |
+|---|---|---|
+| 看版本/地址/服务健康 | ① 概览 | docker inspect / 端口探测 |
+| 改 `.env`（端口、S3 对外地址、密码等） | ② 配置 → 保存 .env → **应用变更** | 写 `.env` 后 `docker compose up -d` 重建有变化的容器 |
+| 改 application.properties / nginx / compose | ② 配置 → 配置文件编辑 → 保存 → **应用变更** | bind mount + up -d；properties 变更自动补 `restart cict` |
+| 只升级后端 | ③ 升级 → 上传 JAR | 备份旧包 → `docker compose build cict` → 重建 cict |
+| 只升级前端 | ③ 升级 → 上传 zip | 同步 `nginx/html`（bind mount 实时生效） |
+| 重启/启停单个组件 | ④ 服务 | `docker compose start/stop/restart <服务>` |
+| 看容器日志 | ⑤ 日志 | `docker logs --tail`，支持跟随刷新 |
+| 更新控制台自身 | ③ 升级 → 更新本控制台 | GitHub 在线更新或上传新版 `.run`，更新后服务自动重启 |
+
+两个易混操作的区别（与命令行语义一致）：
+
+- **重启**（`docker compose restart`）：Java 进程重启，**不重读 `.env`**；
+- **应用变更**（`docker compose up -d`）：按新配置重建容器，改 `.env` / 端口 / 挂载后用这个。
+
+命令行重跑 install.sh 仍然完全可用且幂等；控制台只是把同一套动作搬进了浏览器。在线模式 `--app-jar` 与 `--frontend` 现在可各自独立提供（只升级其中之一时另一个保持不动，仅升级后端时必须带 `--tag`）。
+
+安全边界：控制台以 root 运行、只绑 `127.0.0.1:8788` 且强制令牌校验；不要把 SSH 隧道转发给不可信网络。
 
 ---
 

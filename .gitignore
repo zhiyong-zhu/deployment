@@ -8,3 +8,4 @@ installer/.venv/
 installer/.build-venv/
 installer/config.json
 deploy/bundle/dist/
+deploy/gui/VERSION

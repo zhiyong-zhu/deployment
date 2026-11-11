@@ -62,10 +62,13 @@ done
 
 # ===== 模式确定与输入校验 =====
 if [[ "$ONLINE" -eq 1 ]]; then
-  [[ -n "$APP_JAR" && -n "$FRONTEND" && -n "$TAG" ]] || { usage >&2; die "在线模式必须提供 --app-jar、--frontend、--tag"; }
-  [[ -f "$APP_JAR" ]] || die "JAR 文件不存在: $APP_JAR"
-  [[ -e "$FRONTEND" ]] || die "前端产物不存在: $FRONTEND"
-  [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "非法版本标签: $TAG"
+  # --app-jar 与 --frontend 各自可选：支持只升级后端或只升级前端；两者至少给一个
+  [[ -n "$APP_JAR" || -n "$FRONTEND" ]] || { usage >&2; die "在线模式必须提供 --app-jar 和/或 --frontend（首次安装两者都要）"; }
+  [[ -z "$APP_JAR" || -f "$APP_JAR" ]] || die "JAR 文件不存在: $APP_JAR"
+  [[ -z "$FRONTEND" || -e "$FRONTEND" ]] || die "前端产物不存在: $FRONTEND"
+  if [[ -n "$APP_JAR" ]]; then
+    [[ -n "$TAG" && "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "升级后端必须提供合法版本标签 --tag"
+  fi
   if [[ "$FRONTEND" == *.zip ]] && ! command -v unzip >/dev/null 2>&1; then
     die "解压前端 zip 需要 unzip（sudo apt install -y unzip）"
   fi
@@ -299,25 +302,33 @@ if [[ "$ONLINE" -eq 0 ]]; then
   done
 fi
 
-# ===== 3. 项目文件来源（两种模式在此统一） =====
+# ===== 3. 项目文件来源（两种模式在此统一；--app-jar/--frontend 可只给其一） =====
 if [[ "$ONLINE" -eq 1 ]]; then
   SRC="$DEPLOY_DIR"
   SRC_APP_JAR="$APP_JAR"
-  # 前端产物解压/定位
-  FRONTEND_TMP="$(mktemp -d)"
-  if [[ "$FRONTEND" == *.zip ]]; then
-    unzip -q "$FRONTEND" -d "$FRONTEND_TMP"
-  else
-    FRONTEND_TMP="$FRONTEND"
+  # 前端产物解压/定位（未提供 --frontend 时跳过，保留部署目录现有前端）
+  if [[ -n "$FRONTEND" ]]; then
+    FRONTEND_TMP="$(mktemp -d)"
+    if [[ "$FRONTEND" == *.zip ]]; then
+      unzip -q "$FRONTEND" -d "$FRONTEND_TMP"
+    else
+      FRONTEND_TMP="$FRONTEND"
+    fi
+    if [[ -f "$FRONTEND_TMP/index.html" ]]; then
+      SRC_HTML="$FRONTEND_TMP"
+    elif [[ -f "$FRONTEND_TMP/dist/index.html" ]]; then
+      SRC_HTML="$FRONTEND_TMP/dist"
+    else
+      die "前端产物中找不到 index.html: $FRONTEND"
+    fi
   fi
-  if [[ -f "$FRONTEND_TMP/index.html" ]]; then
-    SRC_HTML="$FRONTEND_TMP"
-  elif [[ -f "$FRONTEND_TMP/dist/index.html" ]]; then
-    SRC_HTML="$FRONTEND_TMP/dist"
+  # 只升级前端时不换镜像 tag：沿用现有 .env 的 CICT_IMAGE_TAG
+  if [[ -n "$APP_JAR" ]]; then
+    BUNDLE_TAG="$TAG"
   else
-    die "前端产物中找不到 index.html: $FRONTEND"
+    BUNDLE_TAG="$(grep -E '^CICT_IMAGE_TAG=' "$TARGET_DIR/.env" 2>/dev/null | cut -d= -f2 || true)"
+    [[ -n "$BUNDLE_TAG" ]] || die "只升级前端需要已有部署（读取现有 .env 的 CICT_IMAGE_TAG 失败）"
   fi
-  BUNDLE_TAG="$TAG"
 else
   SRC="$SCRIPT_DIR/project"
   SRC_APP_JAR="$SRC/cict/app.jar"
@@ -333,18 +344,22 @@ install -m 0644 "$SRC/docker-compose.yml" "$TARGET_DIR/"
 install -m 0644 "$SRC/.env.example" "$TARGET_DIR/"
 install -m 0644 "$SRC/cict/Dockerfile" "$TARGET_DIR/cict/"
 install -m 0644 "$SRC/cict/application.properties" "$TARGET_DIR/cict/"
-install -m 0644 "$SRC_APP_JAR" "$TARGET_DIR/cict/app.jar.new"
-mv -f "$TARGET_DIR/cict/app.jar.new" "$TARGET_DIR/cict/app.jar"
+if [[ -n "$SRC_APP_JAR" ]]; then
+  install -m 0644 "$SRC_APP_JAR" "$TARGET_DIR/cict/app.jar.new"
+  mv -f "$TARGET_DIR/cict/app.jar.new" "$TARGET_DIR/cict/app.jar"
+fi
 install -m 0644 "$SRC/nginx/nginx.conf" "$TARGET_DIR/nginx/"
 install -m 0644 "$SRC/nginx/conf.d/cict.conf" "$TARGET_DIR/nginx/conf.d/"
-# 就地同步前端（清空内容后复制，不替换目录本身）：
-# 目录 inode 保持不变，运行中容器的 bind mount 才不会指向已删除的孤儿目录（症状: 宿主机文件正常但容器 500）
-mkdir -p "$TARGET_DIR/nginx/html"
-find "$TARGET_DIR/nginx/html" -mindepth 1 -delete
-cp -a "$SRC_HTML/." "$TARGET_DIR/nginx/html/"
-# mktemp -d 产生的 700 权限会被 cp -a 带入，容器内 nginx 用户不可读 → try_files 循环 → 500
-[[ -f "$TARGET_DIR/nginx/html/index.html" ]] || die "前端目录缺少 index.html，请检查 --frontend 产物"
-chmod -R a+rX "$TARGET_DIR/nginx/html"
+if [[ -n "${SRC_HTML:-}" ]]; then
+  # 就地同步前端（清空内容后复制，不替换目录本身）：
+  # 目录 inode 保持不变，运行中容器的 bind mount 才不会指向已删除的孤儿目录（症状: 宿主机文件正常但容器 500）
+  mkdir -p "$TARGET_DIR/nginx/html"
+  find "$TARGET_DIR/nginx/html" -mindepth 1 -delete
+  cp -a "$SRC_HTML/." "$TARGET_DIR/nginx/html/"
+  # mktemp -d 产生的 700 权限会被 cp -a 带入，容器内 nginx 用户不可读 → try_files 循环 → 500
+  [[ -f "$TARGET_DIR/nginx/html/index.html" ]] || die "前端目录缺少 index.html，请检查 --frontend 产物"
+  chmod -R a+rX "$TARGET_DIR/nginx/html"
+fi
 if [[ "$ONLINE" -eq 1 && -n "${FRONTEND_TMP:-}" && "$FRONTEND_TMP" != "$FRONTEND" ]]; then
   rm -rf "$FRONTEND_TMP"
 fi
@@ -421,7 +436,9 @@ cd "$TARGET_DIR"
 log "校验 Compose 配置..."
 docker compose config --quiet
 
-if [[ "$ONLINE" -eq 1 ]]; then
+# 在线模式仅在升级后端（提供 --app-jar）时才需要拉取基础镜像并重新构建；
+# 只升级前端不动镜像（离线模式镜像已在第 2 步 docker load 载入）
+if [[ "$ONLINE" -eq 1 && -n "$APP_JAR" ]]; then
   # 镜像拉取直接消费 Docker API 的 NDJSON 进度流。不能靠 docker pull 的输出做进度：
   # 非 TTY 下它只打印层状态变化、不输出逐层百分比（管道过滤器无从聚合，纯静默时慢速
   # 拉取全程无反馈）；且镜像源连接挂死时 docker 会无限等待。改为：每 10 秒聚合输出一行
@@ -600,7 +617,71 @@ case "$BUCKET_CODE" in
   *) log "警告: 创建 pike 桶返回 HTTP $BUCKET_CODE，请按部署指南 3.10 手工创建" ;;
 esac
 
-# ===== 9. 记录部署状态并输出安装报告 =====
+# ===== 9. 安装/更新运维控制台（幂等；systemd 常驻，浏览器改配置/重启服务/独立升级） =====
+CONSOLE_DIR="/data/app/cict-ops"
+log "安装运维控制台到 ${CONSOLE_DIR} ..."
+mkdir -p "$CONSOLE_DIR"/gui "$CONSOLE_DIR"/bundle \
+         "$CONSOLE_DIR"/cict "$CONSOLE_DIR"/nginx/conf.d "$CONSOLE_DIR"/mariadb
+# 控制台使用 online 布局（gui/deploy-gui.py + bundle/install.sh + compose 树），
+# 离线模式从包根取 GUI/install.sh，在线模式从 deploy/ 取
+install -m 0644 "$SRC/docker-compose.yml" "$CONSOLE_DIR/"
+install -m 0644 "$SRC/.env.example" "$CONSOLE_DIR/"
+install -m 0644 "$SRC/cict/Dockerfile" "$CONSOLE_DIR/cict/"
+install -m 0644 "$SRC/cict/application.properties" "$CONSOLE_DIR/cict/"
+install -m 0644 "$SRC/nginx/nginx.conf" "$CONSOLE_DIR/nginx/"
+install -m 0644 "$SRC/nginx/conf.d/cict.conf" "$CONSOLE_DIR/nginx/conf.d/"
+install -m 0644 "$SRC/mariadb/server.cnf" "$CONSOLE_DIR/mariadb/"
+if [[ "$ONLINE" -eq 1 ]]; then
+  install -m 0644 "$DEPLOY_DIR/gui/deploy-gui.py" "$CONSOLE_DIR/gui/"
+  [[ -f "$DEPLOY_DIR/gui/VERSION" ]] && install -m 0644 "$DEPLOY_DIR/gui/VERSION" "$CONSOLE_DIR/gui/"
+  install -m 0755 "$DEPLOY_DIR/bundle/install.sh" "$CONSOLE_DIR/bundle/"
+else
+  install -m 0644 "$SCRIPT_DIR/deploy-gui.py" "$CONSOLE_DIR/gui/"
+  [[ -f "$SCRIPT_DIR/VERSION" ]] && install -m 0644 "$SCRIPT_DIR/VERSION" "$CONSOLE_DIR/gui/VERSION"
+  install -m 0755 "$SCRIPT_DIR/install.sh" "$CONSOLE_DIR/bundle/"
+fi
+rm -rf "$CONSOLE_DIR/gui/__pycache__"
+# 访问令牌：首次生成，重装/升级保留（覆盖会踢掉所有已打开的浏览器会话）
+CONSOLE_ENV="$CONSOLE_DIR/gui/console.env"
+if [[ ! -f "$CONSOLE_ENV" ]]; then
+  printf 'SERVER_TOKEN=%s\n' "$(openssl rand -hex 16)" > "$CONSOLE_ENV"
+  chmod 600 "$CONSOLE_ENV"
+fi
+CONSOLE_TOKEN="$(grep -E '^SERVER_TOKEN=' "$CONSOLE_ENV" | cut -d= -f2-)"
+cat > /etc/systemd/system/cict-ops.service <<UNIT
+[Unit]
+Description=CICT Ops Console (deploy-gui)
+Documentation=https://github.com/zhiyong-zhu/deployment
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${CONSOLE_DIR}/gui/deploy-gui.py
+WorkingDirectory=${CONSOLE_DIR}/gui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable cict-ops >/dev/null 2>&1 || log "警告: cict-ops 开机自启设置失败"
+# 8788 端口被本次安装向导（.run GUI 模式）占用时先不拉起，避免 restart 循环；
+# 向导退出后手工 systemctl start cict-ops 或重启服务器即可接管
+if ss -lnt 2>/dev/null | grep -q ':8788 '; then
+  log "检测到 8788 端口被占用（可能是本次安装向导），跳过启动 cict-ops；向导关闭后执行: systemctl start cict-ops"
+else
+  systemctl restart cict-ops
+  sleep 2
+  if systemctl is-active --quiet cict-ops && curl -sf -o /dev/null http://127.0.0.1:8788/; then
+    log "运维控制台已启动: http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}"
+  else
+    log "警告: cict-ops 启动异常，请执行 journalctl -u cict-ops -n 50 排查"
+  fi
+fi
+
+# ===== 10. 记录部署状态并输出安装报告 =====
 # 记录本次部署路径与版本：后续升级不带 --target-dir 时自动沿用（见第 0 步的复用逻辑）
 install -d -m 0755 "$(dirname "$STATE_FILE")"
 cat > "$STATE_FILE" <<STATEEOF
@@ -620,6 +701,9 @@ cat <<EOF
 
 ==================== CICT 安装完成 ====================
 访问地址      : http://${SERVER_IP:-<服务器IP>}:${NGINX_PORT}
+运维控制台    : http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}
+                 （远程先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@${SERVER_IP:-<服务器IP>}；
+                   若提示端口被占用，向导关闭后执行 sudo systemctl start cict-ops）
 后端 API 直连 : http://${SERVER_IP:-<服务器IP>}:${CICT_PORT_V}（绕过 nginx，供外部系统直连）
 数据库直连    : ${SERVER_IP:-<服务器IP>}:${MARIADB_PORT_V}（账号与密码见 .env 的 MARIADB_USER/MARIADB_PASSWORD）
 密码文件      : $TARGET_DIR/.env （权限 600，含全部随机密码，请立即备份）
@@ -631,8 +715,8 @@ cat <<EOF
   2. 后端 ${CICT_PORT_V}、MariaDB ${MARIADB_PORT_V} 与 RustFS 9000/9001 已绑定 0.0.0.0 对外直连
      （RustFS 仅凭 AK/SK 认证，无匿名访问），请在防火墙限制来源网段；
      RabbitMQ 管理端口 15672 仍只绑定 127.0.0.1，远程访问走 SSH 隧道
-  3. 查看服务状态: cd $TARGET_DIR 后执行 docker compose ps
-     跟踪服务日志: docker compose logs -f <服务名>（服务名: mariadb/redis/rabbitmq/rustfs/cict/nginx）
+  3. 日常运维（改配置并应用、重启单个服务、独立升级前后端、看日志）优先使用运维控制台；
+     命令行等价操作: cd $TARGET_DIR 后 docker compose ps / logs -f <服务名>
   4. 后续升级: 在线环境重跑本命令并换新 tag；离线环境用新包重跑；不带 --target-dir 时自动沿用本次
      部署路径（记录于 ${STATE_FILE}）。详见部署指南附录 A.3
 

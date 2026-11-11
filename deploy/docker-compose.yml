@@ -109,6 +109,7 @@ services:
     environment:
       # 左侧是容器内变量名，右侧来自同目录的 .env
       JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS}
+      TZ: ${CICT_TZ:-Asia/Shanghai}
       MARIADB_USER: ${MARIADB_USER}
       MARIADB_PASSWORD: ${MARIADB_PASSWORD}
       REDIS_PASSWORD: ${REDIS_PASSWORD}
@@ -120,6 +121,8 @@ services:
       CICT_PUBLIC_S3_ENDPOINT: ${CICT_PUBLIC_S3_ENDPOINT:-http://rustfs:9000}
     volumes:
       - ./logs/cict:/data/logs
+      # 挂载部署目录的配置（覆盖镜像内 COPY 的副本）：改配置只需 up -d 重建容器，无需重新 build 镜像
+      - ./cict/application.properties:/etc/cict/application.properties:ro
     ports:
       # 后端 API 直连：外部系统可绕过 nginx 直连 http://<宿主机IP>:${CICT_PORT}
       # （nginx 的 /api/ 反代仍是统一入口）；对外开放，生产环境建议防火墙限制来源

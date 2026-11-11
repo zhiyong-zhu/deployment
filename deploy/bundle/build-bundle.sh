@@ -118,6 +118,10 @@ install -m 0755 "$SCRIPT_DIR/install.sh" "$BUNDLE_DIR/install.sh"
 if [[ -f "$DEPLOY_DIR/gui/deploy-gui.py" ]]; then
   install -m 0755 "$DEPLOY_DIR/gui/deploy-gui.py" "$BUNDLE_DIR/deploy-gui.py"
 fi
+# 控制台版本标识（离线包根，与 deploy-gui.py 同级；install.sh 装控制台时读取）
+CONSOLE_VERSION="${CICT_CONSOLE_VERSION:-$(git -C "$DEPLOY_DIR" describe --tags --always 2>/dev/null || true)}"
+[[ -n "$CONSOLE_VERSION" ]] || CONSOLE_VERSION="$TAG"
+printf '%s\n' "$CONSOLE_VERSION" > "$BUNDLE_DIR/VERSION"
 printf '%s\n' "$TAG" > "$BUNDLE_DIR/bundle-tag"
 
 # ===== 2. 构建后端镜像 =====

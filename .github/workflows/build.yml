@@ -65,6 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 生成 cict-installer.run
+        env:
+          # checkout@v4 浅克隆下 git describe 拿不到 tag，版本号直接用 ref 名注入
+          CICT_CONSOLE_VERSION: ${{ github.ref_name }}
         run: |
           ./deploy/bundle/make-portable.sh
           # 自解压链路自测：--help 应输出安装脚本用法

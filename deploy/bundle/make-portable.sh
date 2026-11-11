@@ -14,8 +14,16 @@ mkdir -p "$OUT_DIR"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
+# 控制台版本标识：CI 用环境变量注入（tag 名），本地回退 git describe / 时间戳。
+# 写入 deploy/gui/VERSION 随包发布（已 gitignore，打包后清理）；运维台据此显示版本与检查更新。
+CONSOLE_VERSION="${CICT_CONSOLE_VERSION:-$(git -C "$DEPLOY_DIR" describe --tags --always 2>/dev/null || true)}"
+[[ -n "$CONSOLE_VERSION" ]] || CONSOLE_VERSION="dev-$(date +%Y%m%d%H%M)"
+printf '%s\n' "$CONSOLE_VERSION" > "$DEPLOY_DIR/gui/VERSION"
+
 tar -czf "$STAGE/payload.tar.gz" -C "$DEPLOY_DIR" \
   --exclude='bundle/dist' --exclude='__pycache__' --exclude='.DS_Store' .
+
+rm -f "$DEPLOY_DIR/gui/VERSION"
 
 # 头部先以占位符渲染，统计行数后回填（只改内容不改行数，tail -n 偏移恒准）。
 # 提取用 tail -n 而非 awk/sed：二进制负载必须按字节切分，文本工具在部分 locale 下会损坏字节。
