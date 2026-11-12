@@ -11,6 +11,7 @@ TARGET_DIR="/data/app/cict-docker"
 STATE_FILE="/etc/cict-docker/deploy.env"
 TARGET_DIR_EXPLICIT=0
 ONLINE=0
+CONSOLE_ONLY=0
 APP_JAR=""
 FRONTEND=""
 TAG=""
@@ -31,11 +32,13 @@ usage() {
   sudo ./install.sh --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号> [选项]
 
 选项:
+  --console-only    只安装/更新运维控制台（cict-ops systemd 服务 + 访问令牌），不部署应用。
+                    便携安装器 .run 不带参数时的默认动作：先装控制台，后续部署全在网页里完成
   --target-dir DIR   部署目录（默认 /data/app/cict-docker；未显式指定时自动沿用
                      /etc/cict-docker/deploy.env 记录的上次部署路径）
   --skip-engine     已安装 Docker 时跳过 Docker Engine 安装（离线模式跳过离线包安装，在线模式跳过官方源安装）
   --force-env       丢弃现有 .env 并重新生成随机密码（会与已有数据卷中的旧密码不一致，慎用）
-  --online          在线模式，需同时提供 --app-jar / --frontend / --tag
+  --online          在线模式，需提供 --app-jar 和/或 --frontend（首次安装两者都要，升级可独立）
   --docker-apt-mirror BASE  指定 Docker apt 源基地址（如 https://mirrors.aliyun.com/docker-ce）。
                            默认自动探测：官方 → 阿里云 → 中科大 → 清华，用第一个可达的源
   --registry-mirror URL    Docker 镜像加速器，可多次传入。默认自动探测：Docker Hub 直连可用则
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --target-dir) TARGET_DIR="${2:-}"; TARGET_DIR_EXPLICIT=1; shift 2 ;;
     --skip-engine) SKIP_ENGINE=1; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
+    --console-only) CONSOLE_ONLY=1; shift ;;
     --online) ONLINE=1; shift ;;
     --app-jar) APP_JAR="${2:-}"; shift 2 ;;
     --frontend) FRONTEND="${2:-}"; shift 2 ;;
@@ -60,26 +64,130 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ===== 运维控制台安装（幂等；--console-only 与完整安装的第 9 步共用） =====
+CONSOLE_DIR="/data/app/cict-ops"
+CONSOLE_TOKEN=""
+install_console() {
+  log "安装运维控制台到 ${CONSOLE_DIR} ..."
+  mkdir -p "$CONSOLE_DIR"/gui "$CONSOLE_DIR"/bundle \
+           "$CONSOLE_DIR"/cict "$CONSOLE_DIR"/nginx/conf.d "$CONSOLE_DIR"/mariadb
+  # 控制台使用 online 布局（gui/deploy-gui.py + bundle/install.sh + compose 树），
+  # 离线模式从包根取 GUI/install.sh，在线模式从 deploy/ 取
+  install -m 0644 "$SRC/docker-compose.yml" "$CONSOLE_DIR/"
+  install -m 0644 "$SRC/.env.example" "$CONSOLE_DIR/"
+  install -m 0644 "$SRC/cict/Dockerfile" "$CONSOLE_DIR/cict/"
+  install -m 0644 "$SRC/cict/application.properties" "$CONSOLE_DIR/cict/"
+  install -m 0644 "$SRC/nginx/nginx.conf" "$CONSOLE_DIR/nginx/"
+  install -m 0644 "$SRC/nginx/conf.d/cict.conf" "$CONSOLE_DIR/nginx/conf.d/"
+  install -m 0644 "$SRC/mariadb/server.cnf" "$CONSOLE_DIR/mariadb/"
+  if [[ "$ONLINE" -eq 1 ]]; then
+    install -m 0644 "$DEPLOY_DIR/gui/deploy-gui.py" "$CONSOLE_DIR/gui/"
+    [[ -f "$DEPLOY_DIR/gui/VERSION" ]] && install -m 0644 "$DEPLOY_DIR/gui/VERSION" "$CONSOLE_DIR/gui/"
+    install -m 0755 "$DEPLOY_DIR/bundle/install.sh" "$CONSOLE_DIR/bundle/"
+  else
+    install -m 0644 "$SCRIPT_DIR/deploy-gui.py" "$CONSOLE_DIR/gui/"
+    [[ -f "$SCRIPT_DIR/VERSION" ]] && install -m 0644 "$SCRIPT_DIR/VERSION" "$CONSOLE_DIR/gui/VERSION"
+    install -m 0755 "$SCRIPT_DIR/install.sh" "$CONSOLE_DIR/bundle/"
+  fi
+  rm -rf "$CONSOLE_DIR/gui/__pycache__"
+  # 访问令牌：首次生成，重装/升级保留（覆盖会踢掉所有已打开的浏览器会话）
+  local CONSOLE_ENV="$CONSOLE_DIR/gui/console.env"
+  if [[ ! -f "$CONSOLE_ENV" ]]; then
+    printf 'SERVER_TOKEN=%s\n' "$(openssl rand -hex 16)" > "$CONSOLE_ENV"
+    chmod 600 "$CONSOLE_ENV"
+  fi
+  CONSOLE_TOKEN="$(grep -E '^SERVER_TOKEN=' "$CONSOLE_ENV" | cut -d= -f2-)"
+  cat > /etc/systemd/system/cict-ops.service <<UNIT
+[Unit]
+Description=CICT Ops Console (deploy-gui)
+Documentation=https://github.com/zhiyong-zhu/deployment
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${CONSOLE_DIR}/gui/deploy-gui.py
+WorkingDirectory=${CONSOLE_DIR}/gui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable cict-ops >/dev/null 2>&1 || log "警告: cict-ops 开机自启设置失败"
+  # 从控制台自身目录运行（本函数正被 cict-ops 服务进程调起）时严禁重启服务：
+  # restart 会杀掉整个 cgroup，连同正在执行的本安装进程一起终止
+  case "$SCRIPT_DIR" in
+    "$CONSOLE_DIR"/*)
+      log "控制台文件已更新（服务保持运行，下次重启 cict-ops 后加载新版）"
+      return 0
+      ;;
+  esac
+  if systemctl is-active --quiet cict-ops; then
+    systemctl restart cict-ops
+    sleep 2
+    if curl -sf -o /dev/null http://127.0.0.1:8788/; then
+      log "运维控制台已更新并重启: http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}"
+    else
+      log "警告: cict-ops 重启后未响应，请执行 journalctl -u cict-ops -n 50 排查"
+    fi
+  elif ss -lnt 2>/dev/null | grep -q ':8788 '; then
+    log "检测到 8788 端口被其他进程占用（可能是手动运行的向导/控制台），跳过启动；"
+    log "该进程退出后执行: systemctl start cict-ops"
+  else
+    systemctl start cict-ops
+    sleep 2
+    if systemctl is-active --quiet cict-ops && curl -sf -o /dev/null http://127.0.0.1:8788/; then
+      log "运维控制台已启动: http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}"
+    else
+      log "警告: cict-ops 启动异常，请执行 journalctl -u cict-ops -n 50 排查"
+    fi
+  fi
+}
+
 # ===== 模式确定与输入校验 =====
 if [[ "$ONLINE" -eq 1 ]]; then
-  # --app-jar 与 --frontend 各自可选：支持只升级后端或只升级前端；两者至少给一个
-  [[ -n "$APP_JAR" || -n "$FRONTEND" ]] || { usage >&2; die "在线模式必须提供 --app-jar 和/或 --frontend（首次安装两者都要）"; }
-  [[ -z "$APP_JAR" || -f "$APP_JAR" ]] || die "JAR 文件不存在: $APP_JAR"
-  [[ -z "$FRONTEND" || -e "$FRONTEND" ]] || die "前端产物不存在: $FRONTEND"
-  if [[ -n "$APP_JAR" ]]; then
-    [[ -n "$TAG" && "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "升级后端必须提供合法版本标签 --tag"
-  fi
-  if [[ "$FRONTEND" == *.zip ]] && ! command -v unzip >/dev/null 2>&1; then
-    die "解压前端 zip 需要 unzip（sudo apt install -y unzip）"
-  fi
   DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
   [[ -f "$DEPLOY_DIR/docker-compose.yml" ]] || die "未找到部署文件目录（应在 deploy/bundle/ 下执行）"
   [[ -f "$DEPLOY_DIR/.env.example" ]] || die "缺少 $DEPLOY_DIR/.env.example"
+  SRC="$DEPLOY_DIR"
+  # --console-only 不部署应用，跳过产物校验；--app-jar 与 --frontend 各自可选
+  if [[ "$CONSOLE_ONLY" -eq 0 ]]; then
+    [[ -n "$APP_JAR" || -n "$FRONTEND" ]] || { usage >&2; die "在线模式必须提供 --app-jar 和/或 --frontend（首次安装两者都要）"; }
+    [[ -z "$APP_JAR" || -f "$APP_JAR" ]] || die "JAR 文件不存在: $APP_JAR"
+    [[ -z "$FRONTEND" || -e "$FRONTEND" ]] || die "前端产物不存在: $FRONTEND"
+    if [[ -n "$APP_JAR" ]]; then
+      [[ -n "$TAG" && "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "升级后端必须提供合法版本标签 --tag"
+    fi
+    if [[ "$FRONTEND" == *.zip ]] && ! command -v unzip >/dev/null 2>&1; then
+      die "解压前端 zip 需要 unzip（sudo apt install -y unzip）"
+    fi
+  fi
 else
   [[ -f "$SCRIPT_DIR/manifest.sha256" ]] || die "当前目录不是完整的离线安装包（缺少 manifest.sha256）；在线部署请使用 --online 模式"
+  SRC="$SCRIPT_DIR/project"
 fi
 
-[[ "$(id -u)" -eq 0 ]] || die "请使用 sudo 运行（需要安装 Docker Engine 并写入 /data）"
+[[ "$(id -u)" -eq 0 ]] || die "请使用 sudo 运行（需要安装 Docker Engine 与写入 /data）"
+
+# --console-only：只装/更新运维控制台即退出，应用部署在网页里完成（.run 的默认动作）
+if [[ "$CONSOLE_ONLY" -eq 1 ]]; then
+  command -v openssl >/dev/null 2>&1 || die "生成访问令牌需要 openssl"
+  install_console
+  cat <<EOF
+
+==================== 运维控制台就绪 ====================
+访问地址: http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}
+远程先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@<服务器IP>
+后续步骤 : 全部在浏览器里完成——
+  ① 概览查看状态；② 配置填参数并保存 .env；
+  ③ 升级页填 JAR/前端路径与版本号后点「执行安装/升级」完成部署
+令牌文件 : $CONSOLE_DIR/gui/console.env （重装保留；忘记时查看该文件）
+=======================================================
+EOF
+  exit 0
+fi
 
 # ===== 0. 环境预检 =====
 . /etc/os-release
@@ -617,69 +725,8 @@ case "$BUCKET_CODE" in
   *) log "警告: 创建 pike 桶返回 HTTP $BUCKET_CODE，请按部署指南 3.10 手工创建" ;;
 esac
 
-# ===== 9. 安装/更新运维控制台（幂等；systemd 常驻，浏览器改配置/重启服务/独立升级） =====
-CONSOLE_DIR="/data/app/cict-ops"
-log "安装运维控制台到 ${CONSOLE_DIR} ..."
-mkdir -p "$CONSOLE_DIR"/gui "$CONSOLE_DIR"/bundle \
-         "$CONSOLE_DIR"/cict "$CONSOLE_DIR"/nginx/conf.d "$CONSOLE_DIR"/mariadb
-# 控制台使用 online 布局（gui/deploy-gui.py + bundle/install.sh + compose 树），
-# 离线模式从包根取 GUI/install.sh，在线模式从 deploy/ 取
-install -m 0644 "$SRC/docker-compose.yml" "$CONSOLE_DIR/"
-install -m 0644 "$SRC/.env.example" "$CONSOLE_DIR/"
-install -m 0644 "$SRC/cict/Dockerfile" "$CONSOLE_DIR/cict/"
-install -m 0644 "$SRC/cict/application.properties" "$CONSOLE_DIR/cict/"
-install -m 0644 "$SRC/nginx/nginx.conf" "$CONSOLE_DIR/nginx/"
-install -m 0644 "$SRC/nginx/conf.d/cict.conf" "$CONSOLE_DIR/nginx/conf.d/"
-install -m 0644 "$SRC/mariadb/server.cnf" "$CONSOLE_DIR/mariadb/"
-if [[ "$ONLINE" -eq 1 ]]; then
-  install -m 0644 "$DEPLOY_DIR/gui/deploy-gui.py" "$CONSOLE_DIR/gui/"
-  [[ -f "$DEPLOY_DIR/gui/VERSION" ]] && install -m 0644 "$DEPLOY_DIR/gui/VERSION" "$CONSOLE_DIR/gui/"
-  install -m 0755 "$DEPLOY_DIR/bundle/install.sh" "$CONSOLE_DIR/bundle/"
-else
-  install -m 0644 "$SCRIPT_DIR/deploy-gui.py" "$CONSOLE_DIR/gui/"
-  [[ -f "$SCRIPT_DIR/VERSION" ]] && install -m 0644 "$SCRIPT_DIR/VERSION" "$CONSOLE_DIR/gui/VERSION"
-  install -m 0755 "$SCRIPT_DIR/install.sh" "$CONSOLE_DIR/bundle/"
-fi
-rm -rf "$CONSOLE_DIR/gui/__pycache__"
-# 访问令牌：首次生成，重装/升级保留（覆盖会踢掉所有已打开的浏览器会话）
-CONSOLE_ENV="$CONSOLE_DIR/gui/console.env"
-if [[ ! -f "$CONSOLE_ENV" ]]; then
-  printf 'SERVER_TOKEN=%s\n' "$(openssl rand -hex 16)" > "$CONSOLE_ENV"
-  chmod 600 "$CONSOLE_ENV"
-fi
-CONSOLE_TOKEN="$(grep -E '^SERVER_TOKEN=' "$CONSOLE_ENV" | cut -d= -f2-)"
-cat > /etc/systemd/system/cict-ops.service <<UNIT
-[Unit]
-Description=CICT Ops Console (deploy-gui)
-Documentation=https://github.com/zhiyong-zhu/deployment
-After=network.target docker.service
-Wants=docker.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 ${CONSOLE_DIR}/gui/deploy-gui.py
-WorkingDirectory=${CONSOLE_DIR}/gui
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable cict-ops >/dev/null 2>&1 || log "警告: cict-ops 开机自启设置失败"
-# 8788 端口被本次安装向导（.run GUI 模式）占用时先不拉起，避免 restart 循环；
-# 向导退出后手工 systemctl start cict-ops 或重启服务器即可接管
-if ss -lnt 2>/dev/null | grep -q ':8788 '; then
-  log "检测到 8788 端口被占用（可能是本次安装向导），跳过启动 cict-ops；向导关闭后执行: systemctl start cict-ops"
-else
-  systemctl restart cict-ops
-  sleep 2
-  if systemctl is-active --quiet cict-ops && curl -sf -o /dev/null http://127.0.0.1:8788/; then
-    log "运维控制台已启动: http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}"
-  else
-    log "警告: cict-ops 启动异常，请执行 journalctl -u cict-ops -n 50 排查"
-  fi
-fi
+# ===== 9. 安装/更新运维控制台（幂等；实现见文件头部的 install_console 函数） =====
+install_console
 
 # ===== 10. 记录部署状态并输出安装报告 =====
 # 记录本次部署路径与版本：后续升级不带 --target-dir 时自动沿用（见第 0 步的复用逻辑）
@@ -702,8 +749,7 @@ cat <<EOF
 ==================== CICT 安装完成 ====================
 访问地址      : http://${SERVER_IP:-<服务器IP>}:${NGINX_PORT}
 运维控制台    : http://127.0.0.1:8788/?token=${CONSOLE_TOKEN}
-                 （远程先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@${SERVER_IP:-<服务器IP>}；
-                   若提示端口被占用，向导关闭后执行 sudo systemctl start cict-ops）
+                 （远程先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@${SERVER_IP:-<服务器IP>}）
 后端 API 直连 : http://${SERVER_IP:-<服务器IP>}:${CICT_PORT_V}（绕过 nginx，供外部系统直连）
 数据库直连    : ${SERVER_IP:-<服务器IP>}:${MARIADB_PORT_V}（账号与密码见 .env 的 MARIADB_USER/MARIADB_PASSWORD）
 密码文件      : $TARGET_DIR/.env （权限 600，含全部随机密码，请立即备份）

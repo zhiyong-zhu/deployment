@@ -32,8 +32,11 @@ cat > "$HEADER" <<'HDR'
 #!/usr/bin/env bash
 # CICT 便携安装器（单文件自解压，内嵌全部部署文件与安装脚本）
 #
-# Web 向导: sudo ./cict-installer.run            （不带参数即启动，浏览器 http://127.0.0.1:8788）
-# 命令行  : sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号>
+# 默认   : sudo ./cict-installer.run
+#          先安装/更新常驻运维控制台（cict-ops systemd 服务），随后按输出提示
+#          在浏览器里完成部署与日常运维（http://127.0.0.1:8788/?token=...）
+# 命令行 : sudo ./cict-installer.run --online --app-jar <jar> --frontend <zip或目录> --tag <唯一版本号>
+# 兼容   : sudo ./cict-installer.run --gui   （无 systemd 时的一次性向导模式）
 # 其余参数与 deploy/bundle/install.sh 完全一致（--help 查看）
 # 离线部署请使用 build-bundle.sh 产出的完整离线安装包（含镜像与 Engine 离线包）。
 set -euo pipefail
@@ -41,8 +44,14 @@ PAYLOAD_START=__HCOUNT__
 EXTRACT_DIR="$(mktemp -d)"
 trap 'rm -rf "$EXTRACT_DIR"' EXIT
 tail -n +"$((PAYLOAD_START + 1))" "$0" | tar -xzf - -C "$EXTRACT_DIR"
-if [[ $# -eq 0 || "${1:-}" = "--gui" ]]; then
-  echo "启动 Web 部署向导: http://127.0.0.1:8788"
+if [[ $# -eq 0 ]]; then
+  echo "正在安装/更新运维控制台（cict-ops），应用部署稍后在浏览器中完成 ..."
+  echo "当前用户: $(id -un)（需要 sudo/root 运行）"
+  bash "$EXTRACT_DIR/bundle/install.sh" --online --console-only
+  exit $?
+fi
+if [[ "${1:-}" = "--gui" ]]; then
+  echo "（兼容模式）启动一次性 Web 向导: http://127.0.0.1:8788"
   echo "远程操作先建隧道: ssh -L 8788:127.0.0.1:8788 <用户>@<服务器IP>"
   echo "当前用户: $(id -un)（执行安装需要 sudo 启动本程序）"
   ( sleep 1

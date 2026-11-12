@@ -4,14 +4,15 @@
 
 ## 启动
 
-**推荐方式：systemd 常驻服务**（install.sh 安装末尾自动完成，服务名 `cict-ops`，目录 `/data/app/cict-ops`）：
+**推荐方式：`.run` 便携安装器（v1.6.0 起的默认流程）**——不带参数运行时先安装/更新常驻控制台（cict-ops systemd 服务，目录 `/data/app/cict-ops`），脚本随即退出并打印带令牌的访问地址，应用部署与日常运维全部在浏览器里完成：
 
 ```bash
-systemctl status cict-ops          # 查看状态
-sudo systemctl start cict-ops      # 安装向导占用 8788 时，向导退出后手工拉起
+sudo ./cict-installer.run          # 装好控制台即退出，按输出提示打开浏览器
 ```
 
-临时运行（仓库或安装包内）：
+等价的命令行入口：`sudo ./install.sh --online --console-only`（幂等，重跑即更新控制台自身）。兼容入口 `sudo ./cict-installer.run --gui` 保留一次性向导模式（无 systemd 的环境用）。
+
+手动运行（仓库或安装包内）：
 
 ```bash
 sudo python3 deploy/gui/deploy-gui.py    # 在线模式（deploy/gui/ 下）
