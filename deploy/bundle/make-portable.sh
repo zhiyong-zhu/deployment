@@ -49,7 +49,22 @@ if [[ $# -eq 0 || "${1:-}" = "--gui" ]]; then
     xdg-open http://127.0.0.1:8788 >/dev/null 2>&1 \
       || open http://127.0.0.1:8788 >/dev/null 2>&1 \
       || true ) &
-  exec python3 "$EXTRACT_DIR/gui/deploy-gui.py"
+  python3 "$EXTRACT_DIR/gui/deploy-gui.py"
+  GUI_STATUS=$?
+  # 向导退出后的自动交接：安装期间 8788 被本向导占用，install.sh 装好的常驻控制台
+  # cict-ops 当时无法启动——现在端口已释放，若服务已安装但未运行则自动拉起
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl list-unit-files 2>/dev/null | grep -q '^cict-ops'; then
+    if ! systemctl is-active --quiet cict-ops; then
+      echo "检测到常驻控制台 cict-ops 未运行，自动接管端口 8788 ..."
+      if systemctl start cict-ops; then
+        echo "已启动 cict-ops。访问地址见安装完成输出，或: grep SERVER_TOKEN /data/app/cict-ops/gui/console.env"
+      else
+        echo "自动启动 cict-ops 失败，请手工执行: sudo systemctl start cict-ops"
+      fi
+    fi
+  fi
+  exit $GUI_STATUS
 fi
 exec bash "$EXTRACT_DIR/bundle/install.sh" "$@"
 HDR

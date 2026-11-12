@@ -1416,7 +1416,15 @@ def main():
     print(f"CICT 运维控制台 | 模式: {MODE} | 版本: {CONSOLE_VERSION} | http://127.0.0.1:{PORT}")
     print("远程使用请先建立 SSH 隧道: ssh -L 8788:127.0.0.1:8788 <用户>@<服务器IP>")
     if not SERVER_TOKEN:
-        print("警告: 未配置访问令牌（gui/console.env 缺失）。作为常驻 systemd 服务运行前请先配置！")
+        # .run 向导从 mktemp 临时目录运行：无令牌是预期（一次性、仅本机绑定），
+        # 安装完成后 install.sh 会自动部署带令牌的常驻服务 cict-ops，这里不该吓人；
+        # 常驻目录（/data/app/cict-ops 或仓库 checkout）缺令牌才是真正需要处理的
+        if str(SCRIPT_DIR).startswith("/tmp"):
+            print("提示: 一次性安装向导未启用访问令牌（仅本机可用）。"
+                  "完成安装后将自动部署带访问令牌的常驻控制台 cict-ops")
+        else:
+            print("警告: 未配置访问令牌（gui/console.env 缺失）。"
+                  "常驻运行必须配置: printf 'SERVER_TOKEN=%s\\n' \"$(openssl rand -hex 16)\" > gui/console.env && chmod 600 gui/console.env")
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.serve_forever()
 
